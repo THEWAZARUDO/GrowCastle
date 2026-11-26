@@ -1,0 +1,111 @@
+{
+  "TargetWindowTitle": "Grow Castle - Tower Defense - Bestmaneverlive85",
+  "CustomCaptureRegion": null,
+  "StepDelayMinSeconds": 0.1,
+  "StepDelayRandomSpanSeconds": 0.4,
+  "BlueBarDelayMinMs": 42,
+  "BlueBarDelayMaxMs": 72,
+  "WaitAfterBlueBarsMinSeconds": 4.8,
+  "WaitAfterBlueBarsMaxSeconds": 5.7,
+  "WaitBeforeRepeatMinSeconds": 7.3,
+  "WaitBeforeRepeatMaxSeconds": 8.4,
+  "NormalMoveDurationMinMs": 170,
+  "NormalMoveDurationMaxMs": 390,
+  "FastMoveDurationMinMs": 22,
+  "FastMoveDurationMaxMs": 33,
+  "CurveIntensityMin": 0.04,
+  "CurveIntensityMax": 0.1,
+  "BlueBarMode": "BlueColorBlob",
+  "BlueBarOrder": "NaturalRandomized",
+  "WaitForMatchTimeoutMs": 12000,
+  "BlueBarAppearDelayMs": 450,
+  "Targets": [
+    {
+      "Key": "Step1DragonIcon",
+      "DisplayName": "1. Icon T\u01B0\u1EE3ng R\u1ED3ng (B\u01B0\u1EDBc 1)",
+      "Description": "Icon m\u1EDF danh s\u00E1ch r\u1ED3ng tr\u00EAn b\u1EA3n \u0111\u1ED3",
+      "TemplateFileName": "step1_dragon_icon.png",
+      "Threshold": 0.84,
+      "RequireColorMatch": false,
+      "SearchRoi": null
+    },
+    {
+      "Key": "Step2LegendaryDragon",
+      "DisplayName": "2. R\u1ED3ng huy\u1EC1n tho\u1EA1i",
+      "Description": "N\u00FAt ch\u1ECDn R\u1ED3ng huy\u1EC1n tho\u1EA1i",
+      "TemplateFileName": "step2_legendary_dragon.png",
+      "Threshold": 0.84,
+      "RequireColorMatch": false,
+      "SearchRoi": {
+        "X": 0.3752609603340292,
+        "Y": 0.3252788104089219,
+        "Width": 0.2985386221294363,
+        "Height": 0.14033457249070633
+      }
+    },
+    {
+      "Key": "Step3BattleButton",
+      "DisplayName": "3. N\u00FAt BATTLE",
+      "Description": "N\u00FAt BATTLE v\u00E0o tr\u1EADn",
+      "TemplateFileName": "step3_battle.png",
+      "Threshold": 0.84,
+      "RequireColorMatch": false,
+      "SearchRoi": {
+        "X": 0.05010438413361169,
+        "Y": 0.05483271375464684,
+        "Width": 0.9321503131524008,
+        "Height": 0.9442379182156134
+      }
+    },
+    {
+      "Key": "Step4BlueBar",
+      "DisplayName": "4. Thanh m\u00E0u xanh lam",
+      "Description": "M\u1ED9t thanh m\u00E0u xanh lam m\u1EABu (s\u1EBD t\u00ECm v\u00E0 nh\u1EA5n t\u1EA5t c\u1EA3 thanh)",
+      "TemplateFileName": "step4_blue_bar.png",
+      "Threshold": 0.9,
+      "RequireColorMatch": true,
+      "SearchRoi": {
+        "X": 0.25676664228237017,
+        "Y": 0.12239583333333333,
+        "Width": 0.1711777615215801,
+        "Height": 0.4817708333333333
+      }
+    },
+    {
+      "Key": "Step6CooldownWhite",
+      "DisplayName": "5. Ch\u1EEF \u0022Gi\u1EA3m h\u1ED3i chi\u00EAu\u0022 (Tr\u1EAFng)",
+      "Description": "D\u00F2ng ch\u1EC9 s\u1ED1 Gi\u1EA3m h\u1ED3i chi\u00EAu m\u00E0u tr\u1EAFng",
+      "TemplateFileName": "step6_cooldown_white.png",
+      "Threshold": 0.85,
+      "RequireColorMatch": true,
+      "SearchRoi": null
+    },
+    {
+      "Key": "Step6CooldownRed",
+      "DisplayName": "6. Ch\u1EEF \u0022Gi\u1EA3m h\u1ED3i chi\u00EAu\u0022 (\u0110\u1ECF)",
+      "Description": "D\u00F2ng ch\u1EC9 s\u1ED1 Gi\u1EA3m h\u1ED3i chi\u00EAu m\u00E0u \u0111\u1ECF",
+      "TemplateFileName": "step6_cooldown_red.png",
+      "Threshold": 0.85,
+      "RequireColorMatch": true,
+      "SearchRoi": null
+    },
+    {
+      "Key": "Step6ClaimButton",
+      "DisplayName": "7. N\u00FAt NH\u1EACN",
+      "Description": "Nh\u1EA5n khi c\u00F3 C\u1EA2 2 d\u00F2ng Gi\u1EA3m h\u1ED3i chi\u00EAu (tr\u1EAFng \u0026 \u0111\u1ECF)",
+      "TemplateFileName": "step6_claim.png",
+      "Threshold": 0.87,
+      "RequireColorMatch": false,
+      "SearchRoi": null
+    },
+    {
+      "Key": "Step6DismantleButton",
+      "DisplayName": "8. N\u00FAt PH\u00C2N R\u00C3",
+      "Description": "Nh\u1EA5n khi KH\u00D4NG c\u00F3 \u0111\u1EE7 c\u1EA3 2 d\u00F2ng Gi\u1EA3m h\u1ED3i chi\u00EAu",
+      "TemplateFileName": "step6_dismantle.png",
+      "Threshold": 0.84,
+      "RequireColorMatch": false,
+      "SearchRoi": null
+    }
+  ]
+}

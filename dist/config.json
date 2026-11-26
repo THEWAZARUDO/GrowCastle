@@ -1,0 +1,112 @@
+{
+  "TargetWindowTitle": "Grow Castle - Tower Defense - Bestmaneverlive85",
+  "CustomCaptureRegion": null,
+  "StepDelayMinSeconds": 0.1,
+  "StepDelayRandomSpanSeconds": 0.4,
+  "BlueBarDelayMinMs": 42,
+  "BlueBarDelayMaxMs": 72,
+  "WaitAfterBlueBarsMinSeconds": 2.9,
+  "WaitAfterBlueBarsMaxSeconds": 3.2,
+  "WaitBeforeRepeatMinSeconds": 0.08,
+  "WaitBeforeRepeatMaxSeconds": 0.14,
+  "NormalMoveDurationMinMs": 170,
+  "NormalMoveDurationMaxMs": 390,
+  "FastMoveDurationMinMs": 22,
+  "FastMoveDurationMaxMs": 33,
+  "CurveIntensityMin": 0.04,
+  "CurveIntensityMax": 0.1,
+  "BlueBarMode": "BlueColorBlob",
+  "BlueBarOrder": "NaturalRandomized",
+  "WaitForMatchTimeoutMs": 12000,
+  "BlueBarAppearDelayMs": 450,
+  "Targets": [
+    {
+      "Key": "Step1DragonIcon",
+      "DisplayName": "1. Icon Tượng Rồng (Bước 1)",
+      "Description": "Icon mở danh sách rồng trên bản đồ",
+      "TemplateFileName": "step1_dragon_icon.png",
+      "Threshold": 0.84,
+      "RequireColorMatch": false,
+      "SearchRoi": null
+    },
+    {
+      "Key": "Step2LegendaryDragon",
+      "DisplayName": "2. Rồng huyền thoại",
+      "Description": "Nút chọn Rồng huyền thoại",
+      "TemplateFileName": "step2_legendary_dragon.png",
+      "Threshold": 0.84,
+      "RequireColorMatch": false,
+      "SearchRoi": {
+        "X": 0.3752609603340292,
+        "Y": 0.3252788104089219,
+        "Width": 0.2985386221294363,
+        "Height": 0.14033457249070633
+      }
+    },
+    {
+      "Key": "Step3BattleButton",
+      "DisplayName": "3. Nút BATTLE",
+      "Description": "Nút BATTLE vào trận",
+      "TemplateFileName": "step3_battle.png",
+      "Threshold": 0.84,
+      "RequireColorMatch": false,
+      "SearchRoi": {
+        "X": 0.05010438413361169,
+        "Y": 0.05483271375464684,
+        "Width": 0.9321503131524008,
+        "Height": 0.9442379182156134
+      }
+    },
+    {
+      "Key": "Step4BlueBar",
+      "DisplayName": "4. Thanh màu xanh lam",
+      "Description": "Một thanh màu xanh lam mẫu (sẽ tìm và nhấn tất cả thanh)",
+      "TemplateFileName": "step4_blue_bar.png",
+      "Threshold": 0.9,
+      "RequireColorMatch": true,
+      "SearchRoi": {
+        "X": 0.25676664228237017,
+        "Y": 0.12239583333333333,
+        "Width": 0.1711777615215801,
+        "Height": 0.4817708333333333
+      }
+    },
+    {
+      "Key": "Step6CooldownWhite",
+      "DisplayName": "5. Chữ \"Giảm hồi chiêu\" (Trắng)",
+      "Description": "Dòng chỉ số Giảm hồi chiêu màu trắng",
+      "TemplateFileName": "step6_cooldown_white.png",
+      "Threshold": 0.85,
+      "RequireColorMatch": true,
+      "SearchRoi": null
+    },
+    {
+      "Key": "Step6CooldownRed",
+      "DisplayName": "6. Chữ \"Giảm hồi chiêu\" (Đỏ)",
+      "Description": "Dòng chỉ số Giảm hồi chiêu màu đỏ",
+      "TemplateFileName": "step6_cooldown_red.png",
+      "Threshold": 0.85,
+      "RequireColorMatch": true,
+      "SearchRoi": null
+    },
+    {
+      "Key": "Step6ClaimButton",
+      "DisplayName": "7. Nút NHẬN",
+      "Description": "Nhấn khi có CẢ 2 dòng Giảm hồi chiêu (trắng & đỏ)",
+      "TemplateFileName": "step6_claim.png",
+      "Threshold": 0.87,
+      "RequireColorMatch": false,
+      "SearchRoi": null
+    },
+    {
+      "Key": "Step6DismantleButton",
+      "DisplayName": "8. Nút PHÂN RÃ",
+      "Description": "Nhấn khi KHÔNG có đủ cả 2 dòng Giảm hồi chiêu",
+      "TemplateFileName": "step6_dismantle.png",
+      "Threshold": 0.84,
+      "RequireColorMatch": false,
+      "SearchRoi": null
+    }
+  ],
+  "LootTrackDurationSeconds": 2
+}
