@@ -440,6 +440,68 @@ public static class ScreenMatcher
         }
     }
 
+    /// <summary>
+    /// Measures, for every region of interest, the fraction of pixels (0..1) that changed
+    /// noticeably between two frames of the same size. ROIs are relative to the frames.
+    /// Used by the mini-game to tell which of the 8 stumps is moving.
+    /// </summary>
+    public static unsafe double[] MeasureMotionRatios(
+        Bitmap frame1,
+        Bitmap frame2,
+        IReadOnlyList<Rectangle> rois,
+        int perPixelThreshold = 28)
+    {
+        var result = new double[rois.Count];
+        int fw = frame1.Width;
+        int fh = frame1.Height;
+        if (fw != frame2.Width || fh != frame2.Height)
+            return result;
+
+        using var f1_24 = Ensure24bpp(frame1);
+        using var f2_24 = Ensure24bpp(frame2);
+
+        var d1 = f1_24.LockBits(new Rectangle(0, 0, fw, fh), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+        var d2 = f2_24.LockBits(new Rectangle(0, 0, fw, fh), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+
+        try
+        {
+            byte* p1 = (byte*)d1.Scan0;
+            byte* p2 = (byte*)d2.Scan0;
+
+            for (int i = 0; i < rois.Count; i++)
+            {
+                Rectangle r = Rectangle.Intersect(rois[i], new Rectangle(0, 0, fw, fh));
+                if (r.Width <= 0 || r.Height <= 0)
+                    continue;
+
+                long changed = 0;
+                for (int y = r.Top; y < r.Bottom; y++)
+                {
+                    byte* row1 = p1 + y * d1.Stride;
+                    byte* row2 = p2 + y * d2.Stride;
+                    for (int x = r.Left; x < r.Right; x++)
+                    {
+                        int i3 = x * 3;
+                        int diff = Math.Abs(row1[i3] - row2[i3]) +
+                                   Math.Abs(row1[i3 + 1] - row2[i3 + 1]) +
+                                   Math.Abs(row1[i3 + 2] - row2[i3 + 2]);
+                        if (diff >= perPixelThreshold)
+                            changed++;
+                    }
+                }
+
+                result[i] = (double)changed / ((long)r.Width * r.Height);
+            }
+        }
+        finally
+        {
+            f1_24.UnlockBits(d1);
+            f2_24.UnlockBits(d2);
+        }
+
+        return result;
+    }
+
     private static Bitmap Ensure24bpp(Bitmap src)
     {
         if (src.PixelFormat == PixelFormat.Format24bppRgb)
