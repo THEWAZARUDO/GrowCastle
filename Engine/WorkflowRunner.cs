@@ -244,10 +244,26 @@ public sealed class WorkflowRunner
         throw new TimeoutException($"Không tìm thấy thanh màu xanh lam nào sau {config.WaitForMatchTimeoutMs / 1000.0:F1}s.");
     }
 
+    // Reference layout of the "Kim cương ở đâu?" panel, measured on a 788x594 screenshot.
+    // Every offset is the centre of one of the 8 stumps relative to the centre of the START button.
+    private static readonly Point[] MiniGameSlotOffsets =
+    [
+        new(-288, -341), // top
+        new(-197, -311), // top-right
+        new(-167, -220), // right
+        new(-197, -130), // bottom-right
+        new(-288, -100), // bottom
+        new(-379, -130), // bottom-left
+        new(-409, -220), // left
+        new(-379, -311)  // top-left
+    ];
+    private const int MiniGameSlotHalfWidth = 28;
+    private const int MiniGameSlotHalfHeight = 40;
+
     /// <summary>
     /// Checks if the "Kim cương ở đâu?" mini-game appeared after BATTLE.
-    /// If found: clicks START, waits for shuffle, detects the spinning stump via motion tracking, clicks it.
-    /// Returns true if the mini-game was detected and handled.
+    /// If found: clicks START, waits for the shuffle, then watches each of the 8 stumps separately
+    /// and clicks the one that keeps spinning. Returns true if the mini-game was detected.
     /// </summary>
     private async Task<bool> TryHandleMiniGameAsync(
         AppConfig config,
@@ -272,7 +288,7 @@ public sealed class WorkflowRunner
             startMatch = ScreenMatcher.FindBestMatch(screen, bounds.Location, startTpl, startCfg);
             if (startMatch != null)
                 break;
-            await Task.Delay(120, ct);
+            await Task.Delay(100, ct);
         }
 
         if (startMatch == null)
@@ -281,101 +297,221 @@ public sealed class WorkflowRunner
         _log($"[Mini-game] Phát hiện mini-game \"Kim cương ở đâu?\" (START: {startMatch.Score:P0})");
         UpdateStep($"Vòng #{loopNum} - Mini-game: Nhấn START");
 
+        // Work out where the 8 stumps are from the START button position (before the cursor moves there)
+        double scale = Math.Clamp(config.MiniGameLayoutScale, 0.3, 4.0);
+        Point startCenter = new(
+            startMatch.ScreenBounds.Left + startMatch.ScreenBounds.Width / 2,
+            startMatch.ScreenBounds.Top + startMatch.ScreenBounds.Height / 2);
+        int halfW = Math.Max(4, (int)Math.Round(MiniGameSlotHalfWidth * scale));
+        int halfH = Math.Max(4, (int)Math.Round(MiniGameSlotHalfHeight * scale));
+
+        var slotRects = new List<Rectangle>(MiniGameSlotOffsets.Length);
+        foreach (var off in MiniGameSlotOffsets)
+        {
+            int cx = startCenter.X + (int)Math.Round(off.X * scale);
+            int cy = startCenter.Y + (int)Math.Round(off.Y * scale);
+            slotRects.Add(new Rectangle(cx - halfW, cy - halfH, halfW * 2, halfH * 2));
+        }
+
+        Rectangle captureBounds = ScreenMatcher.ResolveCaptureBounds(config);
+        Rectangle ring = slotRects[0];
+        foreach (var r in slotRects)
+            ring = Rectangle.Union(ring, r);
+        ring.Inflate(4, 4);
+
         // Click the START button
         await HumanMouse.MoveAndClickAsync(startMatch.ScreenBounds, config, fastMode: false, ct);
-        _log("[Mini-game] Đã nhấn START. Chờ xáo trộn...");
 
-        // Wait for the shuffle animation to complete
+        if (!captureBounds.Contains(ring))
+        {
+            _log("[Mini-game] Vùng 8 hộp nằm ngoài cửa sổ game (kiểm tra MiniGameLayoutScale). Bỏ qua mini-game.");
+            return true;
+        }
+
+        _log("[Mini-game] Đã nhấn START. Chờ xáo trộn...");
         int shuffleWait = config.MiniGameShuffleWaitMs + Random.Shared.Next(0, 500);
         await Task.Delay(shuffleWait, ct);
 
-        UpdateStep($"Vòng #{loopNum} - Mini-game: Tracking hộp quay...");
+        UpdateStep($"Vòng #{loopNum} - Mini-game: Tìm hộp quay...");
 
-        // Estimate the stump search area: use the region above the START button, excluding
-        // the text banner at the top. The stumps occupy roughly the middle 80% of the game panel.
-        Rectangle captureBounds = ScreenMatcher.ResolveCaptureBounds(config);
+        // ROIs relative to the captured ring area
+        var relRois = slotRects
+            .Select(r => new Rectangle(r.X - ring.X, r.Y - ring.Y, r.Width, r.Height))
+            .ToList();
 
-        // Search ROI relative to capture bounds: exclude top ~18% (text) and bottom ~12% (START area)
-        Rectangle motionSearchRoi = new(
-            (int)(captureBounds.Width * 0.08),
-            (int)(captureBounds.Height * 0.18),
-            (int)(captureBounds.Width * 0.84),
-            (int)(captureBounds.Height * 0.68));
+        int slotCount = relRois.Count;
+        int intervalMs = Math.Max(30, config.MiniGameSampleIntervalMs);
+        int pixelThreshold = Math.Max(8, config.MiniGamePixelThreshold);
+        double activeRatio = Math.Clamp(config.MiniGameActiveRatio, 0.005, 0.9);
+        int stableFrames = Math.Max(2, config.MiniGameStableFrames);
+        int windowSize = stableFrames + 2;
 
-        // Take multiple frame pairs and accumulate motion votes
-        int samples = Math.Max(3, config.MiniGameMotionSamplesCount);
-        int intervalMs = Math.Max(50, config.MiniGameMotionIntervalMs);
-        int gridSize = Math.Clamp(config.MiniGameMotionGridSize, 8, 64);
+        // The correct stump spins in place for many turns, then swaps to another slot and keeps spinning.
+        // So we only look at the most recent frames: for each frame pair we record which stump was the
+        // ONLY one moving (-1 = nothing moving, -2 = several moving, e.g. during a swap).
+        var window = new Queue<int>();
+        int frames = 0;
+        int chosen = -1;
 
-        var votedPoints = new List<Point>();
-        _log($"[Mini-game] Bắt đầu motion tracking ({samples} lần, mỗi {intervalMs}ms)...");
+        var trackDeadline = DateTime.UtcNow.AddMilliseconds(Math.Max(1500, config.MiniGameTrackTimeoutMs));
+        _log($"[Mini-game] Theo dõi 8 hộp (tối đa {config.MiniGameTrackTimeoutMs / 1000.0:F1}s)...");
 
-        for (int i = 0; i < samples; i++)
+        Bitmap? prev = ScreenMatcher.CaptureScreen(ring);
+        try
         {
-            ct.ThrowIfCancellationRequested();
-
-            using var frame1 = ScreenMatcher.CaptureScreen(captureBounds);
-            await Task.Delay(intervalMs, ct);
-            using var frame2 = ScreenMatcher.CaptureScreen(captureBounds);
-
-            var motionPt = ScreenMatcher.FindMotionCenter(
-                frame1, frame2, captureBounds.Location,
-                motionSearchRoi, gridSize, perPixelThreshold: 28);
-
-            if (motionPt.HasValue)
+            while (DateTime.UtcNow < trackDeadline)
             {
-                votedPoints.Add(motionPt.Value);
-                _log($"   [Motion #{i + 1}] Phát hiện chuyển động tại ({motionPt.Value.X}, {motionPt.Value.Y})");
-            }
-            else
-            {
-                _log($"   [Motion #{i + 1}] Không phát hiện chuyển động đáng kể.");
-            }
+                ct.ThrowIfCancellationRequested();
+                await Task.Delay(intervalMs, ct);
 
-            // Small extra gap between samples so we get different animation frames
-            if (i < samples - 1)
-                await Task.Delay(Random.Shared.Next(30, 80), ct);
+                var cur = ScreenMatcher.CaptureScreen(ring);
+                double[] ratios = ScreenMatcher.MeasureMotionRatios(prev, cur, relRois, pixelThreshold);
+                prev.Dispose();
+                prev = cur;
+
+                frames++;
+                window.Enqueue(ClassifyMotion(ratios, activeRatio));
+                while (window.Count > windowSize)
+                    window.Dequeue();
+
+                if (frames % 6 == 0)
+                {
+                    string summary = string.Join(" ", ratios.Select(r => (r * 100).ToString("F0")));
+                    _log($"   [Motion #{frames}] % thay đổi 8 hộp: {summary}");
+                }
+
+                // Candidate = the stump that was the only moving one in most of the recent frames
+                int cand = -1;
+                int candCount = 0;
+                for (int i = 0; i < slotCount; i++)
+                {
+                    int c = window.Count(v => v == i);
+                    if (c > candCount)
+                    {
+                        candCount = c;
+                        cand = i;
+                    }
+                }
+
+                if (cand < 0 || candCount < stableFrames)
+                    continue;
+
+                // Move onto it first, then make sure it is STILL spinning (it may have just swapped away)
+                _log($"[Mini-game] Hộp #{cand + 1} đang quay ({candCount}/{window.Count} khung gần nhất). Di chuột tới...");
+                Point target = HumanMouse.PickHumanPointInRect(slotRects[cand], 0.25);
+                await HumanMouse.MoveToAsync(target, config, fastMode: false, ct);
+
+                bool stillSpinning = await ConfirmSpinnerAsync(
+                    ring, relRois, cand, intervalMs, pixelThreshold, activeRatio, ct);
+
+                if (stillSpinning)
+                {
+                    await HumanMouse.ClickAsync(fastMode: false, ct);
+                    chosen = cand;
+                    break;
+                }
+
+                _log($"[Mini-game] Hộp #{cand + 1} không còn quay (có thể vừa đổi chỗ). Theo dõi lại...");
+                window.Clear();
+                prev.Dispose();
+                prev = ScreenMatcher.CaptureScreen(ring);
+            }
+        }
+        finally
+        {
+            prev?.Dispose();
         }
 
-        if (votedPoints.Count == 0)
+        if (chosen < 0)
         {
-            _log("[Mini-game] Không tìm thấy hộp quay. Bỏ qua mini-game.");
-            return true; // Still handled (START was clicked), just couldn't find the spinner
+            _log("[Mini-game] Không tìm thấy hộp nào quay liên tục. Bỏ qua mini-game.");
+            return true;
         }
 
-        // Cluster the voted points and pick the densest cluster center.
-        // Simple approach: average all points that are within a reasonable radius of the median.
-        votedPoints.Sort((a, b) => a.X != b.X ? a.X.CompareTo(b.X) : a.Y.CompareTo(b.Y));
-        int medX = votedPoints[votedPoints.Count / 2].X;
-        int medY = votedPoints[votedPoints.Count / 2].Y;
+        _log($"[Mini-game] Đã nhấn hộp quay #{chosen + 1}.");
 
-        double clusterRadius = gridSize * 2.5;
-        var clusterPoints = votedPoints.Where(p =>
-            Math.Sqrt((p.X - medX) * (p.X - medX) + (p.Y - medY) * (p.Y - medY)) <= clusterRadius
-        ).ToList();
-
-        if (clusterPoints.Count == 0)
-            clusterPoints = votedPoints;
-
-        int avgX = (int)Math.Round(clusterPoints.Average(p => p.X));
-        int avgY = (int)Math.Round(clusterPoints.Average(p => p.Y));
-
-        _log($"[Mini-game] Hộp quay trung bình: ({avgX}, {avgY}) từ {clusterPoints.Count}/{votedPoints.Count} điểm.");
-
-        // Click on the spinning stump
-        UpdateStep($"Vòng #{loopNum} - Mini-game: Nhấn hộp quay!");
-        // Create a click target rect around the detected center
-        int targetW = gridSize * 2;
-        int targetH = gridSize * 2;
-        var targetRect = new Rectangle(avgX - targetW / 2, avgY - targetH / 2, targetW, targetH);
-
-        await HumanMouse.MoveAndClickAsync(targetRect, config, fastMode: false, ct);
-        _log("[Mini-game] Đã nhấn hộp quay! Hoàn tất mini-game.");
-
-        // Brief wait for the game to process the click and show result
+        // Wait for the result, then verify the mini-game panel has closed (START gone)
         await Task.Delay(Random.Shared.Next(800, 1400), ct);
 
+        var closeDeadline = DateTime.UtcNow.AddMilliseconds(2500);
+        bool stillOpen = true;
+        while (DateTime.UtcNow < closeDeadline)
+        {
+            ct.ThrowIfCancellationRequested();
+            Rectangle bounds = ScreenMatcher.ResolveCaptureBounds(config);
+            using var screen = ScreenMatcher.CaptureScreen(bounds);
+            stillOpen = ScreenMatcher.FindBestMatch(screen, bounds.Location, startTpl, startCfg) != null;
+            if (!stillOpen)
+                break;
+            await Task.Delay(200, ct);
+        }
+
+        _log(stillOpen
+            ? "[Mini-game] Cảnh báo: nút START vẫn còn trên màn hình, mini-game có thể chưa đóng."
+            : "[Mini-game] Mini-game đã đóng. Hoàn tất.");
+
         return true;
+    }
+
+    /// <summary>
+    /// Returns the index of the only moving stump, -1 if none is moving, -2 if several are moving.
+    /// </summary>
+    private static int ClassifyMotion(double[] ratios, double activeRatio)
+    {
+        int activeCount = 0;
+        int activeIdx = -1;
+        for (int i = 0; i < ratios.Length; i++)
+        {
+            if (ratios[i] >= activeRatio)
+            {
+                activeCount++;
+                activeIdx = i;
+            }
+        }
+
+        return activeCount switch
+        {
+            0 => -1,
+            1 => activeIdx,
+            _ => -2
+        };
+    }
+
+    /// <summary>
+    /// Watches a few more frames (mouse already resting on the stump) and confirms that
+    /// this stump is still the only one spinning.
+    /// </summary>
+    private static async Task<bool> ConfirmSpinnerAsync(
+        Rectangle ring,
+        IReadOnlyList<Rectangle> relRois,
+        int slot,
+        int intervalMs,
+        int pixelThreshold,
+        double activeRatio,
+        CancellationToken ct)
+    {
+        int hits = 0;
+        Bitmap prev = ScreenMatcher.CaptureScreen(ring);
+        try
+        {
+            for (int k = 0; k < 3; k++)
+            {
+                await Task.Delay(intervalMs, ct);
+                var cur = ScreenMatcher.CaptureScreen(ring);
+                double[] ratios = ScreenMatcher.MeasureMotionRatios(prev, cur, relRois, pixelThreshold);
+                prev.Dispose();
+                prev = cur;
+
+                if (ClassifyMotion(ratios, activeRatio) == slot)
+                    hits++;
+            }
+        }
+        finally
+        {
+            prev.Dispose();
+        }
+
+        return hits >= 2;
     }
 
     private async Task<(bool FoundBoth, MatchResult? Claim, MatchResult? Dismantle, int ScansCount)>

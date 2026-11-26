@@ -103,10 +103,27 @@ public sealed class AppConfig
     // Mini-game "Kim cương ở đâu?" settings
     public bool MiniGameEnabled { get; set; } = true;
     public int MiniGameCheckTimeoutMs { get; set; } = 1800;
-    public int MiniGameShuffleWaitMs { get; set; } = 3200;
-    public int MiniGameMotionSamplesCount { get; set; } = 6;
-    public int MiniGameMotionIntervalMs { get; set; } = 100;
-    public int MiniGameMotionGridSize { get; set; } = 24;
+
+    // Short wait after pressing START before tracking begins (+ up to 500ms random).
+    // The correct stump spins from the start, so there is no need to wait for the shuffle to end.
+    public int MiniGameShuffleWaitMs { get; set; } = 600;
+
+    // Keep tracking the 8 stumps (retrying) for at most this long after the initial wait
+    public int MiniGameTrackTimeoutMs { get; set; } = 12000;
+    public int MiniGameSampleIntervalMs { get; set; } = 70;
+
+    // A pixel counts as "changed" when the summed RGB difference reaches this value
+    public int MiniGamePixelThreshold { get; set; } = 28;
+
+    // A stump is "moving" in a frame pair when at least this fraction of its pixels changed
+    public double MiniGameActiveRatio { get; set; } = 0.05;
+
+    // A stump is a candidate once it was the ONLY moving one in at least this many of the last
+    // (this + 2) frame pairs. Because the spinner swaps slots every few seconds, only recent frames count.
+    public int MiniGameStableFrames { get; set; } = 4;
+
+    // Scale of the mini-game panel relative to the reference layout (788x594). 1.0 = same size.
+    public double MiniGameLayoutScale { get; set; } = 1.0;
 
     public List<TargetConfig> Targets { get; set; } = CreateDefaultTargets();
 
