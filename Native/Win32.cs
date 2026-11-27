@@ -113,6 +113,16 @@ public static class Win32
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool UnregisterHotKey(nint hWnd, int id);
 
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetForegroundWindow(nint hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern nint GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, nuint dwExtraInfo);
+
     [DllImport("winmm.dll")]
     public static extern uint timeBeginPeriod(uint uMilliseconds);
 
@@ -225,6 +235,34 @@ public static class Win32
 
         var partial = windows.FirstOrDefault(w => w.Title.Contains(title, StringComparison.OrdinalIgnoreCase));
         return partial.Handle != 0 ? partial.Bounds : null;
+    }
+
+    /// <summary>
+    /// Brings the window whose title matches to the foreground (so clicks reach the game instead of
+    /// just focusing it). Returns true if the window is now (or already was) in the foreground.
+    /// </summary>
+    public static bool BringWindowToFrontByTitle(string title)
+    {
+        if (string.IsNullOrWhiteSpace(title))
+            return false;
+
+        var windows = GetVisibleWindows();
+        var win = windows.FirstOrDefault(w => string.Equals(w.Title, title, StringComparison.OrdinalIgnoreCase));
+        if (win.Handle == 0)
+            win = windows.FirstOrDefault(w => w.Title.Contains(title, StringComparison.OrdinalIgnoreCase));
+        if (win.Handle == 0)
+            return false;
+
+        if (GetForegroundWindow() == win.Handle)
+            return true;
+
+        // A tap on Alt lets SetForegroundWindow succeed even when another app owns the foreground lock
+        const byte VK_MENU = 0x12;
+        const uint KEYEVENTF_KEYUP = 0x0002;
+        keybd_event(VK_MENU, 0, 0, 0);
+        keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
+
+        return SetForegroundWindow(win.Handle);
     }
 
     private static Rectangle GetAccurateWindowRect(nint hWnd)

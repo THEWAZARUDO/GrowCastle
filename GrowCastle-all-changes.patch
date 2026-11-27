@@ -1,0 +1,1621 @@
+diff --git a/Engine/ScreenMatcher.cs b/Engine/ScreenMatcher.cs
+index d13ae4f..dfdf369 100644
+--- a/Engine/ScreenMatcher.cs
++++ b/Engine/ScreenMatcher.cs
+@@ -440,6 +440,68 @@ public static class ScreenMatcher
+         }
+     }
+ 
++    /// <summary>
++    /// Measures, for every region of interest, the fraction of pixels (0..1) that changed
++    /// noticeably between two frames of the same size. ROIs are relative to the frames.
++    /// Used by the mini-game to tell which of the 8 stumps is moving.
++    /// </summary>
++    public static unsafe double[] MeasureMotionRatios(
++        Bitmap frame1,
++        Bitmap frame2,
++        IReadOnlyList<Rectangle> rois,
++        int perPixelThreshold = 28)
++    {
++        var result = new double[rois.Count];
++        int fw = frame1.Width;
++        int fh = frame1.Height;
++        if (fw != frame2.Width || fh != frame2.Height)
++            return result;
++
++        using var f1_24 = Ensure24bpp(frame1);
++        using var f2_24 = Ensure24bpp(frame2);
++
++        var d1 = f1_24.LockBits(new Rectangle(0, 0, fw, fh), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
++        var d2 = f2_24.LockBits(new Rectangle(0, 0, fw, fh), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
++
++        try
++        {
++            byte* p1 = (byte*)d1.Scan0;
++            byte* p2 = (byte*)d2.Scan0;
++
++            for (int i = 0; i < rois.Count; i++)
++            {
++                Rectangle r = Rectangle.Intersect(rois[i], new Rectangle(0, 0, fw, fh));
++                if (r.Width <= 0 || r.Height <= 0)
++                    continue;
++
++                long changed = 0;
++                for (int y = r.Top; y < r.Bottom; y++)
++                {
++                    byte* row1 = p1 + y * d1.Stride;
++                    byte* row2 = p2 + y * d2.Stride;
++                    for (int x = r.Left; x < r.Right; x++)
++                    {
++                        int i3 = x * 3;
++                        int diff = Math.Abs(row1[i3] - row2[i3]) +
++                                   Math.Abs(row1[i3 + 1] - row2[i3 + 1]) +
++                                   Math.Abs(row1[i3 + 2] - row2[i3 + 2]);
++                        if (diff >= perPixelThreshold)
++                            changed++;
++                    }
++                }
++
++                result[i] = (double)changed / ((long)r.Width * r.Height);
++            }
++        }
++        finally
++        {
++            f1_24.UnlockBits(d1);
++            f2_24.UnlockBits(d2);
++        }
++
++        return result;
++    }
++
+     private static Bitmap Ensure24bpp(Bitmap src)
+     {
+         if (src.PixelFormat == PixelFormat.Format24bppRgb)
+diff --git a/Engine/WorkflowRunner.cs b/Engine/WorkflowRunner.cs
+index c0ef866..7b3a7ca 100644
+--- a/Engine/WorkflowRunner.cs
++++ b/Engine/WorkflowRunner.cs
+@@ -34,113 +34,125 @@ public sealed class WorkflowRunner
+         _stats.Dismantled = 0;
+         UpdateStep("Bắt đầu quy trình...");
+ 
++        int consecutiveFailures = 0;
++
+         try
+         {
+             while (!ct.IsCancellationRequested)
+             {
+                 int loopNum = _stats.Loops + 1;
+                 _log($"=== Bắt đầu vòng #{loopNum} ===");
++                if (config.AutoFocusGameWindow && !string.IsNullOrWhiteSpace(config.TargetWindowTitle))
++                    Win32.BringWindowToFrontByTitle(config.TargetWindowTitle);
+ 
+-                // Bước 1: Nhấn Icon 1 (Tượng rồng)
+-                UpdateStep($"Vòng #{loopNum} - Bước 1: Tìm & nhấn Icon 1");
+-                var m1 = await WaitAndFindAsync(config, templates, TargetKey.Step1DragonIcon, ct);
+-                await HumanMouse.MoveAndClickAsync(m1.ScreenBounds, config, fastMode: false, ct);
+-                _log($"[Bước 1] Đã nhấn Icon 1 ({m1.Score:P0})");
+-                await RandomStepDelayAsync(config, "Sau Bước 1", ct);
+-
+-                // Bước 2: Nhấn Rồng huyền thoại
+-                UpdateStep($"Vòng #{loopNum} - Bước 2: Tìm & nhấn Rồng huyền thoại");
+-                var m2 = await WaitAndFindAsync(config, templates, TargetKey.Step2LegendaryDragon, ct);
+-                await HumanMouse.MoveAndClickAsync(m2.ScreenBounds, config, fastMode: false, ct);
+-                _log($"[Bước 2] Đã nhấn Rồng huyền thoại ({m2.Score:P0})");
+-                await RandomStepDelayAsync(config, "Sau Bước 2", ct);
+-
+-                // Bước 3: Nhấn BATTLE
+-                UpdateStep($"Vòng #{loopNum} - Bước 3: Tìm & nhấn BATTLE");
+-                var m3 = await WaitAndFindAsync(config, templates, TargetKey.Step3BattleButton, ct);
+-                await HumanMouse.MoveAndClickAsync(m3.ScreenBounds, config, fastMode: false, ct);
+-                _log($"[Bước 3] Đã nhấn BATTLE ({m3.Score:P0})");
+-                await RandomStepDelayAsync(config, "Sau Bước 3", ct);
+-
+-                // Bước 3.5: Kiểm tra mini-game "Kim cương ở đâu?"
+-                if (config.MiniGameEnabled)
++                try
+                 {
+-                    bool handled = await TryHandleMiniGameAsync(config, templates, loopNum, ct);
+-                    if (handled)
+-                        await RandomStepDelayAsync(config, "Sau mini-game", ct);
+-                }
+ 
+-                // Bước 4: Tìm và nhấn toàn bộ thanh màu xanh lam (~50ms + random)
+-                UpdateStep($"Vòng #{loopNum} - Bước 4: Đang tìm các thanh màu xanh lam");
+-                if (config.BlueBarAppearDelayMs > 0)
+-                {
+-                    int appearWait = config.BlueBarAppearDelayMs + Random.Shared.Next(0, 180);
+-                    await Task.Delay(appearWait, ct);
+-                }
++                    // Bước 1: Nhấn Icon 1 (Tượng rồng)
++                    UpdateStep($"Vòng #{loopNum} - Bước 1: Tìm & nhấn Icon 1");
++                    var m1 = await WaitAndFindAsync(config, templates, TargetKey.Step1DragonIcon, ct);
++                    await HumanMouse.MoveAndClickAsync(m1.ScreenBounds, config, fastMode: false, ct);
++                    _log($"[Bước 1] Đã nhấn Icon 1 ({m1.Score:P0})");
++                    await RandomStepDelayAsync(config, "Sau Bước 1", ct);
++
++                    // Bước 2: Nhấn Rồng huyền thoại
++                    UpdateStep($"Vòng #{loopNum} - Bước 2: Tìm & nhấn Rồng huyền thoại");
++                    var m2 = await WaitAndFindAsync(config, templates, TargetKey.Step2LegendaryDragon, ct);
++                    await HumanMouse.MoveAndClickAsync(m2.ScreenBounds, config, fastMode: false, ct);
++                    _log($"[Bước 2] Đã nhấn Rồng huyền thoại ({m2.Score:P0})");
++                    await RandomStepDelayAsync(config, "Sau Bước 2", ct);
++
++                    // Bước 3: Nhấn BATTLE
++                    UpdateStep($"Vòng #{loopNum} - Bước 3: Tìm & nhấn BATTLE");
++                    var m3 = await WaitAndFindAsync(config, templates, TargetKey.Step3BattleButton, ct);
++                    await ClickUntilGoneAsync(config, templates, TargetKey.Step3BattleButton, m3, 1, "BATTLE", ct);
++                    _log($"[Bước 3] Đã nhấn BATTLE ({m3.Score:P0})");
++                    await RandomStepDelayAsync(config, "Sau Bước 3", ct);
++
++                    // Bước 3.5: Kiểm tra mini-game "Kim cương ở đâu?"
++                    if (config.MiniGameEnabled)
++                    {
++                        bool handled = await TryHandleMiniGameAsync(config, templates, loopNum, ct);
++                        if (handled)
++                            await RandomStepDelayAsync(config, "Sau mini-game", ct);
++                    }
+ 
+-                var blueBars = await WaitAndFindAllBlueBarsAsync(config, templates, ct);
+-                var orderedBars = OrderBlueBars(blueBars, config.BlueBarOrder);
+-                _log($"[Bước 4] Tìm thấy {orderedBars.Count} thanh màu xanh lam. Bắt đầu nhấn mỗi thanh 1 lần...");
++                    // Bước 4: Tìm và nhấn toàn bộ thanh màu xanh lam (~50ms + random)
++                    UpdateStep($"Vòng #{loopNum} - Bước 4: Đang tìm các thanh màu xanh lam");
++                    if (config.BlueBarAppearDelayMs > 0)
++                    {
++                        int appearWait = config.BlueBarAppearDelayMs + Random.Shared.Next(0, 180);
++                        await Task.Delay(appearWait, ct);
++                    }
+ 
+-                for (int i = 0; i < orderedBars.Count; i++)
+-                {
+-                    ct.ThrowIfCancellationRequested();
+-                    await HumanMouse.MoveAndClickAsync(orderedBars[i].ScreenBounds, config, fastMode: true, ct);
++                    var blueBars = await WaitAndFindAllBlueBarsAsync(config, templates, ct);
++                    var orderedBars = OrderBlueBars(blueBars, config.BlueBarOrder);
++                    _log($"[Bước 4] Tìm thấy {orderedBars.Count} thanh màu xanh lam. Bắt đầu nhấn mỗi thanh 1 lần...");
+ 
+-                    if (i < orderedBars.Count - 1)
++                    for (int i = 0; i < orderedBars.Count; i++)
+                     {
+-                        int minMs = Math.Max(10, config.BlueBarDelayMinMs);
+-                        int maxMs = Math.Max(minMs, config.BlueBarDelayMaxMs);
+-                        int delayMs = Random.Shared.Next(minMs, maxMs + 1);
+-                        await PreciseDelayMsAsync(delayMs, ct);
++                        ct.ThrowIfCancellationRequested();
++                        await HumanMouse.MoveAndClickAsync(orderedBars[i].ScreenBounds, config, fastMode: true, ct);
++
++                        if (i < orderedBars.Count - 1)
++                        {
++                            int minMs = Math.Max(10, config.BlueBarDelayMinMs);
++                            int maxMs = Math.Max(minMs, config.BlueBarDelayMaxMs);
++                            int delayMs = Random.Shared.Next(minMs, maxMs + 1);
++                            await PreciseDelayMsAsync(delayMs, ct);
++                        }
++                    }
++                    _log($"[Bước 4] Đã nhấn xong toàn bộ {orderedBars.Count} thanh màu xanh lam.");
++
++                    // Bước 5: Chờ ~3 giây
++                    double waitBattleSec = config.WaitAfterBlueBarsMinSeconds +
++                        Random.Shared.NextDouble() * Math.Max(0, config.WaitAfterBlueBarsMaxSeconds - config.WaitAfterBlueBarsMinSeconds);
++                    UpdateStep($"Vòng #{loopNum} - Bước 5: Chờ {waitBattleSec:F2}s");
++                    _log($"[Bước 5] Chờ {waitBattleSec:F2}s...");
++                    await Task.Delay(TimeSpan.FromSeconds(waitBattleSec), ct);
++
++                    // Bước 6: Liên tục track trong 2 giây xem cả 2 dòng Trắng & Đỏ có xuất hiện không
++                    double trackSec = Math.Max(0.3, config.LootTrackDurationSeconds);
++                    UpdateStep($"Vòng #{loopNum} - Bước 6: Track Trắng & Đỏ ({trackSec:F1}s)");
++                    var (foundBoth, claimMatch, dismantleMatch, scansCount) =
++                        await TrackCooldownLinesAsync(config, templates, trackSec, ct);
++
++                    if (foundBoth)
++                    {
++                        _log($"[Bước 6] Phát hiện CẢ 2 \"Giảm hồi chiêu\" (Trắng & Đỏ) sau {scansCount} lần quét -> Nhấn NHẬN!");
++                        await ClickUntilGoneAsync(config, templates, TargetKey.Step6ClaimButton, claimMatch, 1, "NHẬN", ct);
++                        _stats.Claimed++;
++                        _log($"[Bước 6] -> Đã nhấn NHẬN! (Tổng nhận: {_stats.Claimed})");
++                    }
++                    else
++                    {
++                        _log($"[Bước 6] Hết {trackSec:F1}s ({scansCount} lần quét): Không thấy đủ 2 dòng Trắng & Đỏ -> Nhấn PHÂN RÃ 2 lần!");
++                        await ClickUntilGoneAsync(config, templates, TargetKey.Step6DismantleButton, dismantleMatch, 2, "PHÂN RÃ", ct);
++
++                        _stats.Dismantled++;
++                        _log($"[Bước 6] -> Đã nhấn PHÂN RÃ 2 lần! (Tổng phân rã: {_stats.Dismantled})");
+                     }
+-                }
+-                _log($"[Bước 4] Đã nhấn xong toàn bộ {orderedBars.Count} thanh màu xanh lam.");
+-
+-                // Bước 5: Chờ ~3 giây
+-                double waitBattleSec = config.WaitAfterBlueBarsMinSeconds +
+-                    Random.Shared.NextDouble() * Math.Max(0, config.WaitAfterBlueBarsMaxSeconds - config.WaitAfterBlueBarsMinSeconds);
+-                UpdateStep($"Vòng #{loopNum} - Bước 5: Chờ {waitBattleSec:F2}s");
+-                _log($"[Bước 5] Chờ {waitBattleSec:F2}s...");
+-                await Task.Delay(TimeSpan.FromSeconds(waitBattleSec), ct);
+-
+-                // Bước 6: Liên tục track trong 2 giây xem cả 2 dòng Trắng & Đỏ có xuất hiện không
+-                double trackSec = Math.Max(0.3, config.LootTrackDurationSeconds);
+-                UpdateStep($"Vòng #{loopNum} - Bước 6: Track Trắng & Đỏ ({trackSec:F1}s)");
+-                var (foundBoth, claimMatch, dismantleMatch, scansCount) =
+-                    await TrackCooldownLinesAsync(config, templates, trackSec, ct);
+-
+-                if (foundBoth)
+-                {
+-                    _log($"[Bước 6] Phát hiện CẢ 2 \"Giảm hồi chiêu\" (Trắng & Đỏ) sau {scansCount} lần quét -> Nhấn NHẬN!");
+-                    claimMatch ??= await WaitAndFindAsync(config, templates, TargetKey.Step6ClaimButton, ct);
+ 
+-                    await HumanMouse.MoveAndClickAsync(claimMatch.ScreenBounds, config, fastMode: false, ct);
+-                    _stats.Claimed++;
+-                    _log($"[Bước 6] -> Đã nhấn NHẬN! (Tổng nhận: {_stats.Claimed})");
++                    // Bước 7: Chờ ~0.1 giây rồi lặp lại từ bước 1
++                    _stats.Loops++;
++                    double repeatWaitSec = config.WaitBeforeRepeatMinSeconds +
++                        Random.Shared.NextDouble() * Math.Max(0, config.WaitBeforeRepeatMaxSeconds - config.WaitBeforeRepeatMinSeconds);
++                    int repeatWaitMs = Math.Max(20, (int)Math.Round(repeatWaitSec * 1000.0));
++                    UpdateStep($"Xong vòng #{loopNum} - Chờ {repeatWaitSec:F2}s lặp lại");
++                    _log($"[Bước 7] Hoàn tất vòng #{loopNum}. Chờ {repeatWaitSec:F2}s ({repeatWaitMs}ms) rồi lặp lại...");
++                    await PreciseDelayMsAsync(repeatWaitMs, ct);
++                    consecutiveFailures = 0;
+                 }
+-                else
++                catch (TimeoutException ex)
+                 {
+-                    _log($"[Bước 6] Hết {trackSec:F1}s ({scansCount} lần quét): Không thấy đủ 2 dòng Trắng & Đỏ -> Nhấn PHÂN RÃ 2 lần!");
+-                    dismantleMatch ??= await WaitAndFindAsync(config, templates, TargetKey.Step6DismantleButton, ct);
++                    consecutiveFailures++;
++                    _log($"[Cảnh báo] {ex.Message} (lỗi liên tiếp {consecutiveFailures}/{config.MaxConsecutiveFailures})");
++                    if (consecutiveFailures >= Math.Max(1, config.MaxConsecutiveFailures))
++                        throw;
+ 
+-                    await HumanMouse.MoveAndClickAsync(dismantleMatch.ScreenBounds, config, fastMode: false, ct);
+-                    int doubleClickGapMs = Random.Shared.Next(110, 210);
+-                    await PreciseDelayMsAsync(doubleClickGapMs, ct);
+-                    await HumanMouse.MoveAndClickAsync(dismantleMatch.ScreenBounds, config, fastMode: true, ct);
+-
+-                    _stats.Dismantled++;
+-                    _log($"[Bước 6] -> Đã nhấn PHÂN RÃ 2 lần! (Tổng phân rã: {_stats.Dismantled})");
++                    UpdateStep($"Vòng #{loopNum} - Không thấy mục tiêu, thử lại từ bước 1...");
++                    await PreciseDelayMsAsync(Random.Shared.Next(1200, 2200), ct);
+                 }
+-
+-                // Bước 7: Chờ ~0.1 giây rồi lặp lại từ bước 1
+-                _stats.Loops++;
+-                double repeatWaitSec = config.WaitBeforeRepeatMinSeconds +
+-                    Random.Shared.NextDouble() * Math.Max(0, config.WaitBeforeRepeatMaxSeconds - config.WaitBeforeRepeatMinSeconds);
+-                int repeatWaitMs = Math.Max(20, (int)Math.Round(repeatWaitSec * 1000.0));
+-                UpdateStep($"Xong vòng #{loopNum} - Chờ {repeatWaitSec:F2}s lặp lại");
+-                _log($"[Bước 7] Hoàn tất vòng #{loopNum}. Chờ {repeatWaitSec:F2}s ({repeatWaitMs}ms) rồi lặp lại...");
+-                await PreciseDelayMsAsync(repeatWaitMs, ct);
+             }
+         }
+         finally
+@@ -244,10 +256,26 @@ public sealed class WorkflowRunner
+         throw new TimeoutException($"Không tìm thấy thanh màu xanh lam nào sau {config.WaitForMatchTimeoutMs / 1000.0:F1}s.");
+     }
+ 
++    // Reference layout of the "Kim cương ở đâu?" panel, measured on a 788x594 screenshot.
++    // Every offset is the centre of one of the 8 stumps relative to the centre of the START button.
++    private static readonly Point[] MiniGameSlotOffsets =
++    [
++        new(-288, -341), // top
++        new(-197, -311), // top-right
++        new(-167, -220), // right
++        new(-197, -130), // bottom-right
++        new(-288, -100), // bottom
++        new(-379, -130), // bottom-left
++        new(-409, -220), // left
++        new(-379, -311)  // top-left
++    ];
++    private const int MiniGameSlotHalfWidth = 28;
++    private const int MiniGameSlotHalfHeight = 40;
++
+     /// <summary>
+     /// Checks if the "Kim cương ở đâu?" mini-game appeared after BATTLE.
+-    /// If found: clicks START, waits for shuffle, detects the spinning stump via motion tracking, clicks it.
+-    /// Returns true if the mini-game was detected and handled.
++    /// If found: clicks START, waits for the shuffle, then watches each of the 8 stumps separately
++    /// and clicks the one that keeps spinning. Returns true if the mini-game was detected.
+     /// </summary>
+     private async Task<bool> TryHandleMiniGameAsync(
+         AppConfig config,
+@@ -272,7 +300,7 @@ public sealed class WorkflowRunner
+             startMatch = ScreenMatcher.FindBestMatch(screen, bounds.Location, startTpl, startCfg);
+             if (startMatch != null)
+                 break;
+-            await Task.Delay(120, ct);
++            await Task.Delay(100, ct);
+         }
+ 
+         if (startMatch == null)
+@@ -281,101 +309,286 @@ public sealed class WorkflowRunner
+         _log($"[Mini-game] Phát hiện mini-game \"Kim cương ở đâu?\" (START: {startMatch.Score:P0})");
+         UpdateStep($"Vòng #{loopNum} - Mini-game: Nhấn START");
+ 
++        // Work out where the 8 stumps are from the START button position (before the cursor moves there)
++        double scale = Math.Clamp(config.MiniGameLayoutScale, 0.3, 4.0);
++        Point startCenter = new(
++            startMatch.ScreenBounds.Left + startMatch.ScreenBounds.Width / 2,
++            startMatch.ScreenBounds.Top + startMatch.ScreenBounds.Height / 2);
++        int halfW = Math.Max(4, (int)Math.Round(MiniGameSlotHalfWidth * scale));
++        int halfH = Math.Max(4, (int)Math.Round(MiniGameSlotHalfHeight * scale));
++
++        var slotRects = new List<Rectangle>(MiniGameSlotOffsets.Length);
++        foreach (var off in MiniGameSlotOffsets)
++        {
++            int cx = startCenter.X + (int)Math.Round(off.X * scale);
++            int cy = startCenter.Y + (int)Math.Round(off.Y * scale);
++            slotRects.Add(new Rectangle(cx - halfW, cy - halfH, halfW * 2, halfH * 2));
++        }
++
++        Rectangle captureBounds = ScreenMatcher.ResolveCaptureBounds(config);
++        Rectangle ring = slotRects[0];
++        foreach (var r in slotRects)
++            ring = Rectangle.Union(ring, r);
++        ring.Inflate(4, 4);
++
+         // Click the START button
+         await HumanMouse.MoveAndClickAsync(startMatch.ScreenBounds, config, fastMode: false, ct);
+-        _log("[Mini-game] Đã nhấn START. Chờ xáo trộn...");
+ 
+-        // Wait for the shuffle animation to complete
++        if (!captureBounds.Contains(ring))
++        {
++            _log("[Mini-game] Vùng 8 hộp nằm ngoài cửa sổ game (kiểm tra MiniGameLayoutScale). Bỏ qua mini-game.");
++            return true;
++        }
++
++        _log("[Mini-game] Đã nhấn START. Chờ xáo trộn...");
+         int shuffleWait = config.MiniGameShuffleWaitMs + Random.Shared.Next(0, 500);
+         await Task.Delay(shuffleWait, ct);
+ 
+-        UpdateStep($"Vòng #{loopNum} - Mini-game: Tracking hộp quay...");
++        UpdateStep($"Vòng #{loopNum} - Mini-game: Tìm hộp quay...");
+ 
+-        // Estimate the stump search area: use the region above the START button, excluding
+-        // the text banner at the top. The stumps occupy roughly the middle 80% of the game panel.
+-        Rectangle captureBounds = ScreenMatcher.ResolveCaptureBounds(config);
++        // ROIs relative to the captured ring area
++        var relRois = slotRects
++            .Select(r => new Rectangle(r.X - ring.X, r.Y - ring.Y, r.Width, r.Height))
++            .ToList();
+ 
+-        // Search ROI relative to capture bounds: exclude top ~18% (text) and bottom ~12% (START area)
+-        Rectangle motionSearchRoi = new(
+-            (int)(captureBounds.Width * 0.08),
+-            (int)(captureBounds.Height * 0.18),
+-            (int)(captureBounds.Width * 0.84),
+-            (int)(captureBounds.Height * 0.68));
++        int slotCount = relRois.Count;
++        int intervalMs = Math.Max(30, config.MiniGameSampleIntervalMs);
++        int pixelThreshold = Math.Max(8, config.MiniGamePixelThreshold);
++        double activeRatio = Math.Clamp(config.MiniGameActiveRatio, 0.005, 0.9);
++        int stableFrames = Math.Max(2, config.MiniGameStableFrames);
++        int windowSize = stableFrames + 2;
+ 
+-        // Take multiple frame pairs and accumulate motion votes
+-        int samples = Math.Max(3, config.MiniGameMotionSamplesCount);
+-        int intervalMs = Math.Max(50, config.MiniGameMotionIntervalMs);
+-        int gridSize = Math.Clamp(config.MiniGameMotionGridSize, 8, 64);
++        // The correct stump spins in place for many turns, then swaps to another slot and keeps spinning.
++        // So we only look at the most recent frames: for each frame pair we record which stump was the
++        // ONLY one moving (-1 = nothing moving, -2 = several moving, e.g. during a swap).
++        var window = new Queue<int>();
++        int frames = 0;
++        int chosen = -1;
+ 
+-        var votedPoints = new List<Point>();
+-        _log($"[Mini-game] Bắt đầu motion tracking ({samples} lần, mỗi {intervalMs}ms)...");
++        var trackDeadline = DateTime.UtcNow.AddMilliseconds(Math.Max(1500, config.MiniGameTrackTimeoutMs));
++        _log($"[Mini-game] Theo dõi 8 hộp (tối đa {config.MiniGameTrackTimeoutMs / 1000.0:F1}s)...");
+ 
+-        for (int i = 0; i < samples; i++)
++        Bitmap? prev = ScreenMatcher.CaptureScreen(ring);
++        try
++        {
++            while (DateTime.UtcNow < trackDeadline)
++            {
++                ct.ThrowIfCancellationRequested();
++                await Task.Delay(intervalMs, ct);
++
++                var cur = ScreenMatcher.CaptureScreen(ring);
++                double[] ratios = ScreenMatcher.MeasureMotionRatios(prev, cur, relRois, pixelThreshold);
++                prev.Dispose();
++                prev = cur;
++
++                frames++;
++                window.Enqueue(ClassifyMotion(ratios, activeRatio));
++                while (window.Count > windowSize)
++                    window.Dequeue();
++
++                if (frames % 6 == 0)
++                {
++                    string summary = string.Join(" ", ratios.Select(r => (r * 100).ToString("F0")));
++                    _log($"   [Motion #{frames}] % thay đổi 8 hộp: {summary}");
++                }
++
++                // Candidate = the stump that was the only moving one in most of the recent frames
++                int cand = -1;
++                int candCount = 0;
++                for (int i = 0; i < slotCount; i++)
++                {
++                    int c = window.Count(v => v == i);
++                    if (c > candCount)
++                    {
++                        candCount = c;
++                        cand = i;
++                    }
++                }
++
++                if (cand < 0 || candCount < stableFrames)
++                    continue;
++
++                // Move onto it first, then make sure it is STILL spinning (it may have just swapped away)
++                _log($"[Mini-game] Hộp #{cand + 1} đang quay ({candCount}/{window.Count} khung gần nhất). Di chuột tới...");
++                Point target = HumanMouse.PickHumanPointInRect(slotRects[cand], 0.25);
++                await HumanMouse.MoveToAsync(target, config, fastMode: false, ct);
++
++                bool stillSpinning = await ConfirmSpinnerAsync(
++                    ring, relRois, cand, intervalMs, pixelThreshold, activeRatio, ct);
++
++                if (stillSpinning)
++                {
++                    await HumanMouse.ClickAsync(fastMode: false, ct);
++                    chosen = cand;
++                    break;
++                }
++
++                _log($"[Mini-game] Hộp #{cand + 1} không còn quay (có thể vừa đổi chỗ). Theo dõi lại...");
++                window.Clear();
++                prev.Dispose();
++                prev = ScreenMatcher.CaptureScreen(ring);
++            }
++        }
++        finally
++        {
++            prev?.Dispose();
++        }
++
++        if (chosen < 0)
++        {
++            _log("[Mini-game] Không tìm thấy hộp nào quay liên tục. Bỏ qua mini-game.");
++            return true;
++        }
++
++        _log($"[Mini-game] Đã nhấn hộp quay #{chosen + 1}.");
++
++        // Wait for the result, then verify the mini-game panel has closed (START gone)
++        await Task.Delay(Random.Shared.Next(800, 1400), ct);
++
++        var closeDeadline = DateTime.UtcNow.AddMilliseconds(2500);
++        bool stillOpen = true;
++        while (DateTime.UtcNow < closeDeadline)
+         {
+             ct.ThrowIfCancellationRequested();
++            Rectangle bounds = ScreenMatcher.ResolveCaptureBounds(config);
++            using var screen = ScreenMatcher.CaptureScreen(bounds);
++            stillOpen = ScreenMatcher.FindBestMatch(screen, bounds.Location, startTpl, startCfg) != null;
++            if (!stillOpen)
++                break;
++            await Task.Delay(200, ct);
++        }
+ 
+-            using var frame1 = ScreenMatcher.CaptureScreen(captureBounds);
+-            await Task.Delay(intervalMs, ct);
+-            using var frame2 = ScreenMatcher.CaptureScreen(captureBounds);
++        _log(stillOpen
++            ? "[Mini-game] Cảnh báo: nút START vẫn còn trên màn hình, mini-game có thể chưa đóng."
++            : "[Mini-game] Mini-game đã đóng. Hoàn tất.");
+ 
+-            var motionPt = ScreenMatcher.FindMotionCenter(
+-                frame1, frame2, captureBounds.Location,
+-                motionSearchRoi, gridSize, perPixelThreshold: 28);
++        return true;
++    }
+ 
+-            if (motionPt.HasValue)
++    /// <summary>
++    /// Returns the index of the only moving stump, -1 if none is moving, -2 if several are moving.
++    /// </summary>
++    private static int ClassifyMotion(double[] ratios, double activeRatio)
++    {
++        int activeCount = 0;
++        int activeIdx = -1;
++        for (int i = 0; i < ratios.Length; i++)
++        {
++            if (ratios[i] >= activeRatio)
+             {
+-                votedPoints.Add(motionPt.Value);
+-                _log($"   [Motion #{i + 1}] Phát hiện chuyển động tại ({motionPt.Value.X}, {motionPt.Value.Y})");
++                activeCount++;
++                activeIdx = i;
+             }
+-            else
++        }
++
++        return activeCount switch
++        {
++            0 => -1,
++            1 => activeIdx,
++            _ => -2
++        };
++    }
++
++    /// <summary>
++    /// Watches a few more frames (mouse already resting on the stump) and confirms that
++    /// this stump is still the only one spinning.
++    /// </summary>
++    private static async Task<bool> ConfirmSpinnerAsync(
++        Rectangle ring,
++        IReadOnlyList<Rectangle> relRois,
++        int slot,
++        int intervalMs,
++        int pixelThreshold,
++        double activeRatio,
++        CancellationToken ct)
++    {
++        int hits = 0;
++        Bitmap prev = ScreenMatcher.CaptureScreen(ring);
++        try
++        {
++            for (int k = 0; k < 3; k++)
+             {
+-                _log($"   [Motion #{i + 1}] Không phát hiện chuyển động đáng kể.");
++                await Task.Delay(intervalMs, ct);
++                var cur = ScreenMatcher.CaptureScreen(ring);
++                double[] ratios = ScreenMatcher.MeasureMotionRatios(prev, cur, relRois, pixelThreshold);
++                prev.Dispose();
++                prev = cur;
++
++                if (ClassifyMotion(ratios, activeRatio) == slot)
++                    hits++;
+             }
+-
+-            // Small extra gap between samples so we get different animation frames
+-            if (i < samples - 1)
+-                await Task.Delay(Random.Shared.Next(30, 80), ct);
+         }
+-
+-        if (votedPoints.Count == 0)
++        finally
+         {
+-            _log("[Mini-game] Không tìm thấy hộp quay. Bỏ qua mini-game.");
+-            return true; // Still handled (START was clicked), just couldn't find the spinner
++            prev.Dispose();
+         }
+ 
+-        // Cluster the voted points and pick the densest cluster center.
+-        // Simple approach: average all points that are within a reasonable radius of the median.
+-        votedPoints.Sort((a, b) => a.X != b.X ? a.X.CompareTo(b.X) : a.Y.CompareTo(b.Y));
+-        int medX = votedPoints[votedPoints.Count / 2].X;
+-        int medY = votedPoints[votedPoints.Count / 2].Y;
++        return hits >= 2;
++    }
++
++    private static MatchResult? FindNow(AppConfig config, Bitmap tpl, TargetConfig cfg)
++    {
++        Rectangle bounds = ScreenMatcher.ResolveCaptureBounds(config);
++        using var screen = ScreenMatcher.CaptureScreen(bounds);
++        return ScreenMatcher.FindBestMatch(screen, bounds.Location, tpl, cfg);
++    }
++
++    /// <summary>
++    /// Clicks a button and checks that it disappeared. If it is still on screen the click did not
++    /// register (game not focused, click too fast...), so click again, up to ClickRetryMax times.
++    /// The button position is refreshed right before each attempt.
++    /// </summary>
++    private async Task<MatchResult> ClickUntilGoneAsync(
++        AppConfig config,
++        Dictionary<TargetKey, Bitmap> templates,
++        TargetKey key,
++        MatchResult? knownMatch,
++        int clicksPerAttempt,
++        string label,
++        CancellationToken ct)
++    {
++        var cfg = config.GetTarget(key);
++        var tpl = templates[key];
++        var target = knownMatch ?? await WaitAndFindAsync(config, templates, key, ct);
++        int maxAttempts = config.VerifyClicks ? Math.Max(1, config.ClickRetryMax) : 1;
+ 
+-        double clusterRadius = gridSize * 2.5;
+-        var clusterPoints = votedPoints.Where(p =>
+-            Math.Sqrt((p.X - medX) * (p.X - medX) + (p.Y - medY) * (p.Y - medY)) <= clusterRadius
+-        ).ToList();
++        for (int attempt = 1; attempt <= maxAttempts; attempt++)
++        {
++            ct.ThrowIfCancellationRequested();
+ 
+-        if (clusterPoints.Count == 0)
+-            clusterPoints = votedPoints;
++            if (attempt > 1 && config.AutoFocusGameWindow && !string.IsNullOrWhiteSpace(config.TargetWindowTitle))
++                Win32.BringWindowToFrontByTitle(config.TargetWindowTitle);
+ 
+-        int avgX = (int)Math.Round(clusterPoints.Average(p => p.X));
+-        int avgY = (int)Math.Round(clusterPoints.Average(p => p.Y));
++            // The button may have moved or been re-drawn since it was last seen
++            var fresh = FindNow(config, tpl, cfg);
++            if (fresh != null)
++                target = fresh;
+ 
+-        _log($"[Mini-game] Hộp quay trung bình: ({avgX}, {avgY}) từ {clusterPoints.Count}/{votedPoints.Count} điểm.");
++            for (int c = 0; c < clicksPerAttempt; c++)
++            {
++                await HumanMouse.MoveAndClickAsync(target.ScreenBounds, config, fastMode: c > 0, ct);
++                if (c < clicksPerAttempt - 1)
++                    await PreciseDelayMsAsync(Random.Shared.Next(110, 210), ct);
++            }
+ 
+-        // Click on the spinning stump
+-        UpdateStep($"Vòng #{loopNum} - Mini-game: Nhấn hộp quay!");
+-        // Create a click target rect around the detected center
+-        int targetW = gridSize * 2;
+-        int targetH = gridSize * 2;
+-        var targetRect = new Rectangle(avgX - targetW / 2, avgY - targetH / 2, targetW, targetH);
++            if (!config.VerifyClicks)
++                return target;
+ 
+-        await HumanMouse.MoveAndClickAsync(targetRect, config, fastMode: false, ct);
+-        _log("[Mini-game] Đã nhấn hộp quay! Hoàn tất mini-game.");
++            // Wait (up to the timeout) for the button to disappear
++            var verifyDeadline = DateTime.UtcNow.AddMilliseconds(Math.Max(300, config.ClickVerifyTimeoutMs));
++            while (DateTime.UtcNow < verifyDeadline)
++            {
++                await Task.Delay(90, ct);
++                if (FindNow(config, tpl, cfg) == null)
++                    return target;
++            }
+ 
+-        // Brief wait for the game to process the click and show result
+-        await Task.Delay(Random.Shared.Next(800, 1400), ct);
++            if (attempt < maxAttempts)
++                _log($"[Thử lại] Nút {label} vẫn còn sau khi nhấn (lần {attempt}/{maxAttempts}). Nhấn lại...");
++        }
+ 
+-        return true;
++        _log($"[Cảnh báo] Nút {label} vẫn còn sau {maxAttempts} lần nhấn. Tiếp tục quy trình.");
++        return target;
+     }
+ 
+     private async Task<(bool FoundBoth, MatchResult? Claim, MatchResult? Dismantle, int ScansCount)>
+@@ -385,8 +598,6 @@ public sealed class WorkflowRunner
+             double trackDurationSeconds,
+             CancellationToken ct)
+     {
+-        var claimCfg = config.GetTarget(TargetKey.Step6ClaimButton);
+-        var dismantleCfg = config.GetTarget(TargetKey.Step6DismantleButton);
+         var whiteCfg = config.GetTarget(TargetKey.Step6CooldownWhite);
+         var redCfg = config.GetTarget(TargetKey.Step6CooldownRed);
+ 
+@@ -406,8 +617,6 @@ public sealed class WorkflowRunner
+             var whiteCd = ScreenMatcher.FindBestMatch(screen, bounds.Location, templates[TargetKey.Step6CooldownWhite], whiteCfg);
+             var redCd = ScreenMatcher.FindBestMatch(screen, bounds.Location, templates[TargetKey.Step6CooldownRed], redCfg);
+ 
+-            lastClaim = ScreenMatcher.FindBestMatch(screen, bounds.Location, templates[TargetKey.Step6ClaimButton], claimCfg) ?? lastClaim;
+-            lastDismantle = ScreenMatcher.FindBestMatch(screen, bounds.Location, templates[TargetKey.Step6DismantleButton], dismantleCfg) ?? lastDismantle;
+ 
+             if (whiteCd != null && redCd != null)
+             {
+diff --git a/Models/AppConfig.cs b/Models/AppConfig.cs
+index ced5454..6de39f8 100644
+--- a/Models/AppConfig.cs
++++ b/Models/AppConfig.cs
+@@ -100,13 +100,43 @@ public sealed class AppConfig
+     public int WaitForMatchTimeoutMs { get; set; } = 12000;
+     public int BlueBarAppearDelayMs { get; set; } = 450;
+ 
++    // Reliability settings
++    // Bring the game window to the foreground at the start of every loop
++    public bool AutoFocusGameWindow { get; set; } = true;
++
++    // After clicking BATTLE / NHẬN / PHÂN RÃ, check the button disappeared; if not, click again
++    public bool VerifyClicks { get; set; } = true;
++    public int ClickRetryMax { get; set; } = 3;
++    public int ClickVerifyTimeoutMs { get; set; } = 700;
++
++    // A timeout in one loop no longer stops the program; it restarts from step 1.
++    // Stop only after this many failed loops in a row.
++    public int MaxConsecutiveFailures { get; set; } = 5;
++
+     // Mini-game "Kim cương ở đâu?" settings
+     public bool MiniGameEnabled { get; set; } = true;
+     public int MiniGameCheckTimeoutMs { get; set; } = 1800;
+-    public int MiniGameShuffleWaitMs { get; set; } = 3200;
+-    public int MiniGameMotionSamplesCount { get; set; } = 6;
+-    public int MiniGameMotionIntervalMs { get; set; } = 100;
+-    public int MiniGameMotionGridSize { get; set; } = 24;
++
++    // Short wait after pressing START before tracking begins (+ up to 500ms random).
++    // The correct stump spins from the start, so there is no need to wait for the shuffle to end.
++    public int MiniGameShuffleWaitMs { get; set; } = 600;
++
++    // Keep tracking the 8 stumps (retrying) for at most this long after the initial wait
++    public int MiniGameTrackTimeoutMs { get; set; } = 12000;
++    public int MiniGameSampleIntervalMs { get; set; } = 70;
++
++    // A pixel counts as "changed" when the summed RGB difference reaches this value
++    public int MiniGamePixelThreshold { get; set; } = 28;
++
++    // A stump is "moving" in a frame pair when at least this fraction of its pixels changed
++    public double MiniGameActiveRatio { get; set; } = 0.05;
++
++    // A stump is a candidate once it was the ONLY moving one in at least this many of the last
++    // (this + 2) frame pairs. Because the spinner swaps slots every few seconds, only recent frames count.
++    public int MiniGameStableFrames { get; set; } = 4;
++
++    // Scale of the mini-game panel relative to the reference layout (788x594). 1.0 = same size.
++    public double MiniGameLayoutScale { get; set; } = 1.0;
+ 
+     public List<TargetConfig> Targets { get; set; } = CreateDefaultTargets();
+ 
+diff --git a/Native/Win32.cs b/Native/Win32.cs
+index 5e62918..dbb8c7a 100644
+--- a/Native/Win32.cs
++++ b/Native/Win32.cs
+@@ -113,6 +113,16 @@ public static class Win32
+     [return: MarshalAs(UnmanagedType.Bool)]
+     public static extern bool UnregisterHotKey(nint hWnd, int id);
+ 
++    [DllImport("user32.dll")]
++    [return: MarshalAs(UnmanagedType.Bool)]
++    private static extern bool SetForegroundWindow(nint hWnd);
++
++    [DllImport("user32.dll")]
++    private static extern nint GetForegroundWindow();
++
++    [DllImport("user32.dll")]
++    private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, nuint dwExtraInfo);
++
+     [DllImport("winmm.dll")]
+     public static extern uint timeBeginPeriod(uint uMilliseconds);
+ 
+@@ -227,6 +237,34 @@ public static class Win32
+         return partial.Handle != 0 ? partial.Bounds : null;
+     }
+ 
++    /// <summary>
++    /// Brings the window whose title matches to the foreground (so clicks reach the game instead of
++    /// just focusing it). Returns true if the window is now (or already was) in the foreground.
++    /// </summary>
++    public static bool BringWindowToFrontByTitle(string title)
++    {
++        if (string.IsNullOrWhiteSpace(title))
++            return false;
++
++        var windows = GetVisibleWindows();
++        var win = windows.FirstOrDefault(w => string.Equals(w.Title, title, StringComparison.OrdinalIgnoreCase));
++        if (win.Handle == 0)
++            win = windows.FirstOrDefault(w => w.Title.Contains(title, StringComparison.OrdinalIgnoreCase));
++        if (win.Handle == 0)
++            return false;
++
++        if (GetForegroundWindow() == win.Handle)
++            return true;
++
++        // A tap on Alt lets SetForegroundWindow succeed even when another app owns the foreground lock
++        const byte VK_MENU = 0x12;
++        const uint KEYEVENTF_KEYUP = 0x0002;
++        keybd_event(VK_MENU, 0, 0, 0);
++        keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
++
++        return SetForegroundWindow(win.Handle);
++    }
++
+     private static Rectangle GetAccurateWindowRect(nint hWnd)
+     {
+         if (DwmGetWindowAttribute(hWnd, DWMWA_EXTENDED_FRAME_BOUNDS, out RECT dwmRect, Marshal.SizeOf<RECT>()) == 0)
+diff --git a/dist/presets/RongHuyenThoai/templates/minigame_start.png b/dist/presets/RongHuyenThoai/templates/minigame_start.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..4bc0cc37fc0cf59a4ca1e9f1014850423b84d34b
+GIT binary patch
+literal 13637
+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
+X+25Li<MVIq00000NkvXXu0mjf{qr3d
+
+literal 0
+HcmV?d00001
+
+diff --git a/dist/presets/RongHuyenThoai_Backup/templates/minigame_start.png b/dist/presets/RongHuyenThoai_Backup/templates/minigame_start.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..4bc0cc37fc0cf59a4ca1e9f1014850423b84d34b
+GIT binary patch
+literal 13637
+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
+X+25Li<MVIq00000NkvXXu0mjf{qr3d
+
+literal 0
+HcmV?d00001
+
+diff --git a/dist/templates/minigame_start.png b/dist/templates/minigame_start.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..4bc0cc37fc0cf59a4ca1e9f1014850423b84d34b
+GIT binary patch
+literal 13637
+zcmV-LHM+`)P)<h;3K|Lk000e1NJLTq00620003wR0ssI2?lk;r000mGNkl<ZcmeFZ
+z37BP7b?Cp>K6k!VT|IZx^F&X~lYk0>&<uefgFpn82nZ&=MEob;%kbrWCSUS>NsP(k
+zpFuMi<p2Ir6o~PuG=d<aKnu;#-Sj+9)nkpf?tIVie*5fuPu;pz)pR566RFeduDkZy
+zYpuQZT6;SC7U;Wgzjh4Xvk}m0?0FAIU@ZOb;p8hdmj1Eyzo#Scp6>kE>>o@2&<Kdu
+zPCO3JtyD^VeZ}scLRa@Y2HlwIDx6H5?=tp(k+=}H_|D@KFxwr5bSO4i>nis2mUB7Z
+z^Tg3Q784ON8$s*r50onB`j2ee*12|F=NoVAS-pDq>eYK*dF360moc?^&&kAlUorN7
+zk$6wo;yaH|!0anwNQYvRwbf*B?`yB_e`C#ob?f`~?W<KPQSKoc>4#KG#~im*?A^QX
+z=+<pLyE_Mt_WD&<`F>bADhdKMB8;l=%UxmnLZ<=GGrhN%qOG#{Bz58)Hy*fNtysw&
+zJkqs&PuKRH0|yTUfiK#z{x_vxq-*Ey18d*x-nqwjT_>)bm?*JgqhhUfEbah_xD!vr
+z;&DS;Ox37rzpNFG<D@gmbT*l7OHG*AK6y&Vq{$uNiIc{)k4vS~iF7)dOeNxRN93(S
+zbK-pzkwh|{NYrz4;s!?25GA6tqev*bz`>0h4{z91?CVwGqeHB;cHDBMYumPbcTcUR
+z81D;CoqhV*i_SP_@zT@gpSo<`qNQ`@Eu1-T(M<4y#j{UcHh1yzdCSjSbmn<W&beUO
+zIp;4s=Yr+uUa%Z&iWe+9_kv|-ox9|;vlcBqeSuM5GI!CEIdd1zoIQW~?D?n6nrHCL
+zxznc3m^5X^M1xP6ICbWvDIuOZW8&oL6FMfhkDoHGW0J+=CQRw*m^5y@!EF;l{)8zV
+z6Q_<xYwC<iv*%C8=E5a&@NLo3xe&|GT)6Cvh4_EwIg8IeZ|Pa*E<NMi#c=R>*%=GK
+zI7aPR=PWt<JX~E0KJ%O<=UsH##UDKD;t!tv{!7lj^osK@zv_J<TzJ`)7rg({b1(Yf
+zSr>lbOaL*uiOsXmTZYz|VNaJVpKn{Af9foHO7CXPH{D#Yc-De2Vz`84sAc>)`@CWJ
+zf@K%J|BMSRJ`<Z~pSuJghAn`F5Eg^+ADfGp&Bgwl1vBO@oH1v?DKq9yojA24(~(JL
+z6X|iO%(!&AJ>|r;Syz+_{GfN=-rn82wbqOaP5MQo*xS>&b`57e(Xw#y^jq&-@%#Vd
+zQ~&)7_x|@U+;iXOZ@>3<KKkk3z4iY8=l1&_xc&am-+tfcZoBt)Z-sf+Z{7H@yRW<D
+z&Z}<z_=+3vTyfK#SKfT*ikt7e>ZTBG`^{@VasNl|`mLMp{_M@a`PrN9`t6(U`JIoV
+z7~xNU?lw%__q(@!`hi>Td*HTD|4xX1H^iU2?K2Pj#(kf=_5RNzQ^%kA{B8Fe&h4Kz
+z*wo(l!0otk@8@p)&ELNHp5M9UuFu@~o4<Y2CqHw;UB<ENKX%V`x88NlM?ZPZjrjKQ
+z6(9Y?)xUAib-!`<uYK&E>%n*2d;M*9U31GPufFk)D{j2=%8%S}#Z4byaqZ2QUV8Nf
+zmt1w;`&XQI*87$&J9}XW3r;_O@kN)PeaY1qTzbs~mtXt7t8cpG*KfZ((z@x+6}R4X
+z?H%`Cf7fq)<P-PbfHSyp_ka87r+)k9yZ_tGpSb_VyFT-gJ3oEH?Vq~#raP~sxsQD8
+z3Yr7oc;^*$e8&~=fBm-0FT3udD}MbVEZ=a)mB2^txDo*acc60R4Jd|i!*5)1{cV?B
+zciUyS@sT@L-13R5ZoTX3TRw3$G5^@z*MIUeH{uE1S#iS$&b#EaW#=uLvv}t8c~cUp
+zxM;;V=-u0Sbmva5Qq>FrMnGTZf&9^KCOxBL#dYt$<&LXn&7K~MIeYdTJbbvTtGlna
+zZ=h5vm&!n8AYbV2>OFj<d+*)@Tej?abHlbb*Kc3He%qUGZVzdSz}AhMc5L6i_dw_2
+zBS(9>d-{5M`-{a=t>)Iu$8~G27D;DQ?d_SiOs2iPE!&oEZ_9wQ+03L#<7dsDHgo3m
+z*|SfXHFNr$*{95yISqQojA?Ub&zNaA)1jwK8IN!#oeX@xR`YuMay>o$UEM(M?!5<g
+z?e5&Vb@!X=x2=0~%i1?LZ`!nT*RK5rc6VC5dCTr~>$k35w`I-R&1*w=^|cKzzO-i5
+zs<l7;>8sB@|H?BzTJ@vnUVi4;RnI>6^7B7^m8utBdSlhk*1i0*b+5m^Db(78`uYvq
+zwr$;g;J}gI-ds<2UteFYR4NBS;CX(vQtQtR^z`PAcJ*xEzK<xqv1ap{wWdX|rQcY)
+zdCeL)TV8v8!;3Gzv1--2wd*#ofw|UrwZ;gW+O=yptzEmN0h`yZ+X}sP>z;l44<0?*
+zJ1|hl4HO0jimvN*jBA@WXU4K6^Or7}zx=d?z|u1oEIwmisx29dIUHh?sH0oAmU8`C
+zl;Vpsp@@pb<O7$TbIlExBoeW8Z*KkJGpio|_R~*2{n8JgdFcmFz3|=d{Wyf@o>=*l
+zr=MB%?2le19IwBzY2(Hnn>Ov(XkfdgDQ?=dleiPjpT79|b3cCNx#tXE<oi!NkNWpl
+zJ`a5RJI_4+_|uO*{?udt`ShcY{owKc{NbaIKmGXQKYaADryhOm2j6&P<s;vE^6TGN
+z`AzU6PkigqC%+DUEX3b>@*9sl@yNHH_~tjCME9}BpZ=aP`}~iddzrSLe}47z&%gTW
+ztLtBXeIvctvUS(?ZF_+Y8@Ipq+J@I&-}w4#8*uxL*Eho1zI`vFWY3-hyF=*gJlxgY
+zd$g;!uWz7GC{-%8Qn^y8)<|crKi|{S*W1&7w5#Xvk?wu_4~1F>ckk}pv18wcO*?+}
+z%DU%%y!yvKc@;OFdiurhegC;9RzAP-2S0u8xmSMt{OT88c%6Xk*tvi2zJq)A9@x9L
+z3GXp9%+5{*kQuvs_8de2*t7Q_@&=6jp^$T659<34b?!fW@ZeFL-@JL(nzfr>S-qYv
+zzx>L&=YO*LJKuZmk#DVh?)g_YZQ1G8-09OMedy8)R$OuM71v#~_{{l<geKR%>viwg
+zshRra{#>=>G4&@+nQ-}47p9WQe4+I6%j<{{Ll^-GALVll_I+L<k!=7az?LGy7CqMk
+z++#kh1k8_WwF*%S5d<2=VrgI?p9k{!+&~^Wm&*_2@&*s&;TR%UD3(fYwTe7iqk&ti
+zRqa!$Rx8z7wOX?)kcXbz?6almA%wy9<I!Unp80sg9%G~a3GLPC;a{HXMa*GVj>(AB
+znuy3&i>7rlFrEjjL%Vi${_N%TKYRJjuI^qI)D>60|Fm-#C)<)Ld|4~@_33K4+`Df-
+z$HHnw-F(ND3l_~{EU$d>CyZ{JcrYWVQm&Lr#d5J!%omIKLIj0;0kFl0u*G7b0F=nl
+zv7u-T76$T#JW#N@BWo3lgZyH#%#<vaO2rahS=tb`*ua&N*{-UUO3fy|TBRda*mi^w
+zW?KXo@&)We&`z;XEEWobkS|bcs`7;)xKJz=8j?mWbS7-Q6#53XUX`dV7-1vdV&vGx
+zh8Bt#X;>>k!x`dClar+)OIIcEJuLx~=h<ghJ@JE|Fn`WIYssSJb2A-j5yb+aJwj6|
+zl4Hut&sdbsq}VB0y5U#|{Gd`Hh{l}fxsIdaG5yX0FO7A0yOt9%r*0vB!bEdlVvabD
+z#I$lm#k4pgmeVXVoHniFfPultBx2gaaQTzRi8<QQ;s;)>TB~wtYX*T?9eqF8v-`ly
+zudb_<DwC&8%#KTQ01P~(3*Fr$n8KoE)7siH1Nq{n&AVc;SUvZF$-U=#j-%VM$&R+v
+z<ne7&CjKhJ)UbC`Cz(Fhamaah^m;;OVn?PulggyyTAQ8Sb6vJPwk{5Rot;NHxAyf9
+zv~^@f6mJ2#|G<I3^Icb+GIMH2M;mKucXyx7J?F!!d1{U$9qp-U6WhkOr{gj0Xo)}z
+z4}x`#6aA7<VGNHLff1Qu!0HGA5v7~bL5|a@*rf59X_MMg$rx3>?=u2?PB6Y-t=2fS
+zdY;$Tkzv9srF12i4+39{V(NRIUo4cE=u`x}x42%lT)_qdDw~RXe&Aarszab{*2YXS
+z)|QTq%f#OXw1-+_c*F>d$ZQUBHXTbR97n=rG!QBB$y1=n+PG{=i;zm+^}vWQAiz%C
+z5tar~x}5U^-}gMlb)(jr)1@B-A_7q=76U(M&n7adI2_gVAVVpWa3-`R=1t8mp4q-^
+z*0`S=jFF|Y8hG|NL%)Zy?fx<XGCPcID{fzOO54my8CK+ET>If+o}@(JXx8jxB5w9^
+z=Dp{6Q4-_HI2%91Mw?Nfly-ROcWSO%E>|3fn*qO8sgnC_+T@<m6dAQdHW{1Rk(@WJ
+zZQ6ts+d&Yhn&<!A5MaUe8rby>{T{})`!xdMhOuqMW|n4C&aBCqxl^*^vvCq(vlC(R
+z!mb^TfWWJ{gM8oDj!@K|4>lKp42>XQRtG$+2F!ln4<=8{Iu6T(k+B~vqBnnfcIM;^
+zD}PLjr~rA<JPxM--}eJQG-?&b@JWjRi6H!BA(L_zp3*jLe3IO?w8jZwT-NYCcX0NT
+zEV9Ip`*tr-j$^c31_;?y0iu-Sag6gl1X2ly1t;cc^i4$&#1o132@_|Xx^(XHGiEMY
+zJaPId@nlLFJEnf@^9zUobCPsSY)_1DOFEiSp`wR8I5Dy;W^+I;tO)$Tu$0p58F1X1
+z;{9Jlw4=$r>zRcjolGc32-P7#27#K^k(fF@DIrG%f#-RXX3Sc0{)G!pKYPxSWsA-{
+z|Ex<sJax{zRED#qY0(Of;a@-mw8(;KnYL8SCr?f7u_-v3U;F|yy~8TuZXguWI?SZw
+zs8X@S(&2kPgMgugdMsviAR@>losPDoXNL^G9*Sf;#-B2OVJg$+xi!yqEuOu2>Cy`>
+z9yf84k|7&MWM_;xNf973lRJ`H!lZ_6kZwn`c0@!~s}<%j>~QuggzB>&wL-BRXSvtm
+z#eR57bTlgl!gbK1#<wNdX>6IXg20qnbH+`Yq8-OFEsiIWFy}2lGilcV%N@ffKLX^~
+zzK4_bs5QqS{{qKzJ<Aj=9M2dE_1Ukr(wby*n5@rN42dv4th~W7N7`9f7%8S?KI5mJ
+zGGqQipF1N{8uH;Vm>JhGb@tpLCWeTN72f#>kYh(H($t(f(j2zL2w*!l<gnTAvyTVN
+z{!}Vi;{eFQjuK#m&4;<p%N`@Z6ih8=2fgIH3lqt-<+S1;NTgC7lczB7TC2v&Co=+~
+zB$;p$vHCQoDLAALA_CDZvtLv^9%JK=u~LNRJrT4bc?O5#YL68nV#SlmWIA0RP7$}6
+z;H4m*aAL8Rwwp!9=yyB<WQ5!&<4$B5j)>TzADDOY5oSNr_)0Y3000mGNkl<ZG!}Of
+z$#|{mk}%=18X;!M=eki#-HM1zI%Q^9b1W2#$3+H*;ju)=>fWIUu>L3GI+Yj<yQpy4
+z57%sFxFUJ2vtOIp?{TL010l&GYUl%lsSmbnt#$i^N#01iz7?>TU)Fuk6=}6*Ysc_O
+ziU0`&BIC`oKNxZLd%n_297mITUf)>j0|tvys$s)tC3keAWWM9cRKQ3x<j5at%lUy?
+ztu}J?826+_fZQ`z$)IgP8nd4wNfD*Ua_h-I7IRn`Jl8{+^+5|rMGqx3qat<O^$r$?
+zQ6f?<7IHn^5W_0R7$-LZOm`-5)CR?-EC~Ezdw=*ssI`L}7kMVrV&o9DFw_Lb19l3L
+zAu?9dVodcOIdpLM4v|r1tmGJe$0Hz$e-fFMrrGcNCetI#e$6$0;QKyrbYx5-WlKnt
+z3CpRJ3L;|ZVOXk_Qul#Qk<kQ(X^b)6xd<><nV^w9iXx3fgj+&jvdkE1-1(cGAP5|7
+zwtuEI3X!rU;D|I#a4hisd~c7A#cb^mY{Y_|!-u*K>=PMO86q=QIGGU;GTRh+ie@>l
+zw`lS|!t8f6Kl8Jsn?LJAp)TC`g41Nea7+2T&xz5HLq4KZuKVc0o!gz5`LD!>)QuH>
+zArWA%jyn4p8D{pf#v4leW;AfmZ|-`uHZO>*|3-hPqi{sXY@N$c$oKaa2Kqz>nIfV@
+z%7wz4Fa4AeAR=|?v9Dij1Vr&qqBdp7#%=Q5H2Xs-(fs7kPzYQvoc(0Zh=p|_8frpG
+z_!ne{cI~K?OJThkJ&cK5PuHH!>jTagB9=dffAJAut{(U75540ufEPI}I#ApO^O7Hg
+z>_LP@k)at4f`hwv?q0u+mwUHbajR91`deRn`N-bggKA^c|BVQU;-5q<i!zIPRD=*s
+zmd%XS_9}-j(c0(Xy<ck)L8uvIm<c7~yI${+gPUJ_Wy8;2*s$uSyVkF%mP+uO6)lZD
+zN2}P00P-q)wA2;3#>T=4VT_<2ni)janPc0bA#{-(R0}Dr!9TWcb1imI2~`J?D1{NK
+znk9$Rtpd6p2l%Lq8uekWjyn6pE;XI}LnHR&FJgZ4_08lzj@fS%gIcwk@9P=p?Ex1D
+z27C+|{@@2MQ!%yuXz;@=-s5Wx{O7vkz-!%=8@++Difi@ye*e2~dT2eiW>oy`bsn`X
+z_|Y}q_t(3t_nJ4|gkxN?nK(QUJh{<(><za?zS+XJ*Sb${_73Lw1zgbulnJ_sT6e&I
+za+8PU(R7>rMCO05_kOn9b3_3ud{S}MUsgZd?0x4=<8!lo3*AzDY^~`&F~lssb@m5z
+z%K8=>9z=r6_}XAlWM8hA#C*5Te$h(Ey&rJn>p0rbMr`mS!)O0s<uNHyukG`n+U%~`
+z@9*q3u%qiZaCfl&p#Pt1YmcsRpWp6nKH?u+YkO$31@G$iHysI{-{F6MgG<EmQj2<S
+zoA>Rt?)pRi&Ys{HHn(>NYY+HHzPQtihp)Fx2y}n6&BHM)x3opqET`EfoGpj_RlEIf
+zzTuKB5i{vg|L%JC^-h25Q6H^l`4+mR7ztx`ZKwa;^(HLl_dC`49AoyAXQW$aKYM==
+z@G`)bzywB}&LTDluta3Ae0&tclio62DlV&$Un~?_pj0fvDGkMid>&5Vd%Y#Ks|Qz=
+z>(<~D@`hi?zXdLrN`-vhV$XGPdh3zkyKfreK!5P+KEG5`zULuR3MEIxcoq0QZvS+L
+zzy2UMB8pxxj(OF^Cc0&-TP#ACilgF6rR)c4M_2IujqdoAu%3PMb?-<%&?=~u%g5F&
+z6-PEp)4aQtYQf`cyj|U`nIbcy_$Lq+q-p93Ge9XY%QTu=EAxm}BI5hLo&Cy`RP)np
+zqM3gT+R=)6v#pC($bArt#Xj(X4_t7;1@C*``yvc691uAF{PR<(lu}BRdB%?)f8m7}
+z!bf;S3^RgAhUO+up6q#^h&oybaOTZ}K5IDL?C9vY=%R}vNpxH23opDdlgZFFS{n~~
+zrK;-e3kaR-x)UZ$z_OJ`u>~w23{bUT!2;%0BBpXBbs*>W6n%C9Iwc~@mMufTij9az
+zWa8Ml=bnoj_=Z1wdQ6X?n}NAX#3K$xnzKbQr~4ony!8v&%zmFyD&l(PzXn1fWDg=Z
+zk%>X>D3pj|hkIp@_s}Z0v$q~KdiyW`@-JWe+SeX>=%KHD?Je-vzV@}tF1yT{7m?3>
+z?sH%L>Q`Yt^w7w<|Nig)PHhYR*MI%j-~avJ@9XQsPR&#Q_EL>a1bSd#;P%^ZM;I8c
+zWjRzm@W2DCN~DTy;*mGpzM>h&xm@n9yY9j=0#>pGKlD)D!-pS!7@7b2um4)IWC=!4
+ze&luUhg*D(c=*5=`nP}kH*_C*s4hR8e(0eQsvdgiAuLayKHc}tty@<iV47jD8AS0<
+zB916~^5>^~%>!RrPX1zNe-OB?hXe`;H3OU=pbO2sQE5@?js5-$JAF31su!M~1m39f
+z!z<kIiTI=;qECpZR;zT!s`M09)%^Xsg2R$vna9BBiWs-~^b`U@im>B2xCU{Ykk99B
+z+?c8TrJ%1=&z6WV3Xjvsa52<jiYO6I>ySf$xytSku_z*@kX5Gdyzm8nm=uck?7-{~
+zSyFS&E{y_0YUtye^bci?RC2W1*XKX8#rLri_)M4n{(f+!GUR_KIFjlhFBXgG`o3hC
+z1l@d{_y;>trbz>CkPp^_<8g*GTY3DCj6h)L_#MIXa=F~w+e@;W2eI$_R2{#a7D?QI
+z6DY+NuAzp4sOGg_iJARKF#AP?(xO=pOor<*7Ok{4d%sun1j>vljH~DoQLfn*BF3l$
+zdmGzixki*YOX^#0x#i9~@BHK^KY9K2*L&g4(yWOP#o?H^7YYTcED*loGQ<Cn#L5s^
+zv@GuG>PjRM6sd~G<2T%J!^b}MvHS18f6<~vaIDN|c-E|0_uY3N@*n^B$0tslh!KFC
+zi3mglxM3||5N0!`zl^r)uDcE+MBud3PP4U$p+X-aEXQI79Gn)wJ{&7xF-3;8@IXmm
+zCop6Lo*w{_mrO&k1yTwq6;5@A1;6-(O4tYj76kD<-jb0IxkFLD>>keo;AquXHk$Ns
+z+_-Un@fUybKf;F)aN4@~;)}tYU%(uE-v9phkBB+-{OCtN!U`vC>^%73gI1n17xLiq
+z&O7h!yYG%BF@YmV@KL<vl1n1|=YRg^?d|Q@VI^O_eEDDh^<V$VpZv)ezVHRcB17TQ
+zOD{!oIR4OwK1A*O`SbtykN+5XfJTWAcF3qDpn+$feU?+IZSjL2{2<n>4`BG0Uw-*B
+z&ph*~Pkrjo{_M~G@DKm+i(mXAM^3Z=#^p^n-GtdF0_bAl@y8#hHiDHaS6+GLmCa&=
+z?woVZ*|%?Bpd=Ynr%l%`8H*H@BGZ+c52(f?cJ_-hb;>-VB?yzO!^J>}nf==H{Hp5;
+z1w@tk7}@Z{)|D^0%{>p<BcQ<YhG<)sqVwd5bYce#muQZNIqGxpCifFE7!rmNVgTwE
+zqt3KuLQ@1p1Qlu_YPDK~X%X5APzw>klqpl1B^e(`TFj_o#f~H);D7<gaS(&BfMYD_
+z&30%70kGDZU4vGvB$$-rHUxn4*=!afiU3+{5Hn{E`2$)yXjLLHLWgcLnR0z~%`)eV
+zQ#6|_cAB9^9&3Yxf<zNU)s)b{XR4dBwo3=IpAy&pm2ySVLJ+hlD3N>#v-RYv(H|6p
+zhLm+Wk|ik6^izwB2(B+RU#cFUcsr+izxBa*HlgTC)l*eZs0|bbXvDZlh%smZuT6ze
+zg}Pv>;)x%an-&D91vi7`2#-?686CO=1xLgNJ(7oK>6RYh0Fu-K+FB5?1RPWtE?^6m
+z0}Uaf!cGZ20wjEJiB%ne2;cx=rRh=4GhM5Cihi9tOP@b`gxn)suKMMg9~lv5KZPhO
+zO3_tHfl}JeekZ1A*mb>XwI*7WQo^GKA6Tvz<jY=IImjPQVH9D@Z|*#tsF;kawqz@`
+zr_{N#^(70O56pKio~v&@%VA~n{ot0fV%IEnE}W|`ny0~YCz!LY^^VYB)`I1@zM3^&
+zuz=)+bM%#qjS&QFEkp!5>^gB|32jTMwuAyR)Zi$kB3Ge-sG;F}%ONc2wj~wNo>Vah
+zB@;uRvzZ~y#~L9%Y|Pg!cP?FMdUVlTeZd@!E)uxpnavk+2#_l5pEujc)31x?nc!Tq
+z&>0wZm=>ixFDO=AT8T^q%1&nX{5rdJ_G4X#`vE6^>m_3t_ahS!EXCcqN(&Qy3*bS$
+z5#!3>5`<XPw_;WGm71VzXkN_T?DPjJ{*-og^)hGKR4t-N=j1jydzMM$iX{%|Tr$m3
+zftmUk6rnY~4Oq8pUa(-Y{<Y=K6^k8=pxBl$GPc&pH9j^mTFf%jS2XwV;9Ob3K_qe&
+z8W1r?AcpfT#|sp?bc);MUfwXne$yx!MQaEIX70|Ns6V*Cp-1?6`KeA@_}@(9k{wJ#
+z<ikSEQ`atcu3X|=wbc3Wsm_8)nqN}FnxRNkrRMkKYjt<SO0lzFnXrWnC1I{flV<jt
+z!R06%r6;}@hzLRknQzDjh$`2-{ycBeEfo!c@EfC1bxUVxA`~$pcC;D<F*NsaN)$J&
+z{2anCgI0})8Ob;x1Yo8PRU)Pl;@c2WB8DT1bvvkf0g}k0Xaz*X5)l@ubNI#+vTm^z
+z5UJPNV$@JekKk()LWOi>!O^DJqG*c-i>YNUSr08HXjEy<@hcoS6ovxsaKxiW04hT(
+zhm^X_nqckK`GE?=kfNYSHsin#FbK20_d`*pGk}p)N_Z4(6+IL<`FHk|dvaBw5LFB%
+zsEHc)o0dMLCQX`@<j|5zjfi1-p4nV-<>2+bembtqfIzJk2D@Q=Y}8uM?T#ln5%L?~
+z_0=Ne8H6yK9j8kg9TB%2!9?no@X+WtJ|Z%8>eO^Pjhz-8kH_h6^XqGU=#T?tCP2f+
+zV3Y}0T_&n)5Prb?Y!pWMX8i3sT<m3jiZqLeGTS9dhe^l5f@rfFlo@(7Pn`vHEYXZ%
+zR$cE%f7xv;63w-i4u_X=Jtg4*iubowt5&`A(n~MC_#*E=T$g_N%U}M=SHAM)FSp{q
+z|NFn^O$j5(nC$BDU)<^Um(6dQaE3yl@IwTq?F<AUVmKO#jt1cuMEzTdnA%3k6hHs@
+z&;R2;{^M7^@|6)W?`hMfO^f8ChFa2d>Zzw<;h+BLpN3;@xakoBKl#Z|UVi!IRjXEg
+z?|a|lg#y>eWn>uw4j2#-Z=}7SD)KdSD#05B5!0jILT$w3If)h{%OI#XWx69ul+u=A
+zau!k|VkDLF?bk4jWU=aPKafAzQ_>CLW~s8PZal-BYy3cS>A`jVJ@?$hyDxXzym@o=
+zF&dm5J`6!eD{hOQ-s1hwAJ?AU<_%i|-htVV!~6y@nkVp=H`3w&000mGNkl<ZE?vrm
+zM$CdpJuEHh;l=OFGtWeRL^%EQ)91{Y^AG><5ByAU@4ff(PVe&g>eo+?an7}t!FAKh
+zEKx1Pi&_hem~fM^r6CyCsx^P-q5S@?qU(iO98yo3NqmD9){BHORE<SQYk_2K56ml|
+z;t@Wh0970USY-Bf6}xhks_SDdrp0Lhj0@+*l5z2sW@+W(rLC>a8)aO#G=dnQ0-qm?
+zGYNThuV3{f?ik~?2~G2&L<Gek2*4IZ42RjT1!0XdF-Pc^hNYB<sa0?Hi5eO$J);?B
+zH1nFy^#c)LJXJl#0e;C8Uf6I_@DM+>#y7w?Y5G2rEks0&ybXd?Bwxjfcd(~?pr@2C
+zyRH|AG1IEwnEiu%(;ZQwR2UmG?kKPW2+yF@F)6a%HBdR&TV~vC-aoK$Uv5(aHtfyq
+zJ)HaSyvm}9=Aecd+9MDU#|GA0e$8YRVBR1p${fp|-Bj4JKeuUrZUgrB=MMFnJ4Fl{
+z0YQXs19gs8M{?Emd-^vczc;se|G<&{3e~n2;_ZP*y&>=T265Di2={AdkTOo=Iyh~r
+zw|r7@$Dte{GCkUB`n9!lfH{N;PL4LbP~W^aN00&Hym4=+cwk`9(ZZ4ba$lk5vp!&A
+zBoNg!`$GY|GRHvGNPn1lMe||paic)dYNh6vt6pg+43r5}ZDB`wV%n?u!Z~a2-o1bM
+zmw)--gAe|{;q%~whIsJ7I)3oM2mj+g{)2_|OJDlZ-~R32{@vgG9hau~!7wjWRk7lh
+zDjrP~EBq+o3l$+WJ8Zh7loo!q@`@F=SeJKQ*X(1qHdHbQMSgFkQG6K@fBoxU@9F6=
+zqTvVm@LOqJpD?z#bLY<g89v|q<~R8z$uhxDJ@pi3>Bt}b(I0hocCu|x&A9KIQJR@8
+zAI*8TFA>I7n>(EJ5k<cRL}?}Yii-+6uZaWEu6UKI&$4d@mpb+n$k2Mz9bv*_HmtB^
+zI;UVV($qWiVCkY6rKOW9z7j4+zw@2%kmLV9d@K=RP6nKexCiC#mZg$CmDSQZLHD#6
+z5(F5k@gZIfvOabZ79|pL!9YmXYb^~Hkr!TgfgIz@aEw<R+?o&V$fE_cq=(<4$UYYS
+z`JexpgAM`~o_OL3j4&oR^l{u1QByKrI%fX#!3tQ%>ezmnHQ4+}W(8U>k&J>sRYL>v
+zc)-qnY={ygFMI{e|3>;9(IJar5>RDCOl=SnKNqTbGNY}=y65`F3GFz;!Eqdx2e281
+zVQUc~wix2!C=#Pe#K?kh8i3ObBBr*PLvu`JuxKsX5h4&`Cwx+=RI~AjMy1&Ze0Fp+
+zkZ<O*-<L|IYWTp%pWXd&?pmNn0IEZ-2$vRqNVX!pZ%DOP9Y>k8B83gG0h4-BqLenJ
+zaNL=BBcfoQNIPnjhtWh0XORjkzo;{&ROXDUC3KK<g5*$~a_q{7xDvsEA%yj%&NVed
+zJ|crPWP&==3#A6Rs{Yv8dLjI>9NK15PRqJevL3i2<-?)g_lKlGq;7IJ-*QMaKj4}T
+zuT~@RAO7%%|KJb);P-y-_in!VW(J2NDpzqj2V!2JpzF41#zLcvOD)68)`N*dLyFRg
+zf}l>4BMU-=%n)d#U(6G(kYcJZk1OD}2SQVU+R~kT{ZQ)FgXxzKq&IaZj}{#|&uv!=
+zW>rAmHWW1)5w<Gy-inNhMT{&6VW34$#MCx3MGVIaq&?xEHMM-&r1IHQ%hR*`sBQQy
+zX^8w8&bJ&={#SqXSG?r{4?q0yRaafb5B$Ib4?Hku&K%lxbg-k3fTWLvaey-j4R_@v
+z&;BsurddM>L!gm<j~@ZdE1%&pfe<kaOHnvM;0K4*2UGh7VgprOcBSa*s%L)M@&h5<
+z!@-(o8qt4CM?@nsmVGR2Gla{cOvlvF$JRFUEC+cODrTe;UP4FfGtM*%NB#`wTMl^3
+zmMyDSuYTo~SGv2qt#K@vsqZ)tctt1($m)aXtv!iY{lbMB6}gL+*7fyR4Sk3M7KZYU
+zzhq~>k+(*KCe09Nq@V5uydE$D_%dQDtPQCXM1-=dNa7vB%3{cG-kgsj=;`T!?&;~_
+zoZO5FnbsP4+Zr^1gBFD+e7`l&1%$-hXN;gCf+gw)LBw#(XOK5Y;lN-49~dTKc{ty4
+z0wWVjC`B(UlQP4iR;%$#KmFzKOM*#!cgZ0*)Ybvzkdl)-`*AUB#(W110Qz1ZYrgCG
+z9xqhpB^41W=q~_$qQC^|DLX6x^qdQy?|%2YKls59R<2z6<daXXT)EQHV9v(89YvVC
+zVcwA#1pD^w+rNMR=FOXVQKacWHAX0fV*-(-9-l?gHT9NHU49ffoNulnF}66IZ|%gj
+z8kh9_KxwUCef8DVt5?$t`f}*dp+Ei8KYiwzXP$iW$<KcFvz!x!-xyt8a&gm|RFS)w
+z5^3VA!G}1ETrnte45~5vF%jAqnhfW+Nxvv_#p|2L^XUO)gb3s@48BzrHs}oJ`NfMD
+zFIcc((V|5Q7cOkUmLK6W&N$<ZH{RfK6yQRB*REYOf;-9M`yT^}(53<rDFEGLgGeYp
+ziV#_BuAwisIGitH?0CM)CVXCVMC9nvqhI*K7w84I-5WM+;HrE6{P}eA;)^fljUcom
+zzCDbGg=n!tH)_b%M3^>?r&E#qP$FuK7O+HvffD}NsU^y*sVX-JzVZVfk%n^6Al~M;
+zcY=3h9H7_{*d2fx_ceja#C%>EyvYC29jON{Fujt|#iAN3A4KJ$gsqKuQB3?{Zv>I#
+z+;O$DrdAS8;QIkfJzY3__%Ih3k&#iO(Qp@2EyF9)#m|OR#5;b%&VCz2V@3#4H2X2b
+zRQElPwoL_P6}|<8#Lt76{U@Z(4+K`;50vLiTOv4hV%764ua0pQ3Rf8`5EeKn)Ze^?
+zp>4qOn=vZQMeCb1vkYBlknhG!HC*hQFQp)w`Orw3DlvbVGHYDz^eL5!#~vE;M9f#?
+zL+?a}aOySWHl*;7gF;Bw(S!*TMCvLHse09kd<`aEg|RWI7lweH{Yo*WUC&Ra6S0^%
+zrq)fLK!bG+`^EN8l0<}yv#);jtN&m4@H)izF)$Z@T%QpF<~moTm&`7FXm(*%JEsV1
+zwT|19z89E3P1~_!$CtkJrT-N^U;gr!**K73+{BzA<Ha%in@Jm+F?Y$K`2XTYHac5~
+zog0b~uehGV0(LmDB8j&avxd_h_zW7(D~~+#2>fq+;~S4Y`Y1p1!w;j%lCCBsz3Ud{
+z$ES=BjFoSH``bj|;fEilYg{lB5QG_`u|}g59Uagv1cT{Y-})ADK%N^zfS-)bC=a+T
+zKn9Vw2evVrPQiqbdNTwX=@(IOM06}3{^zVF7GzMpjmHn)q&eAYtr^QChFAl1{@9ow
+zM)&O5LyNAjI+8xG<4hyp`V6-L;}Tv>m}<g90<g)oD<QUbuJmJEg4LJrx`I8CkqK5~
+zE@G`bcfIT~RwC^%o{YQ~2*x>T&?xILnTUMm1ZRb_+3dD$+rIe4FJk9!{^oBu(Ao6I
+z9nxcb<-_P_`0|>^T_!*C69MdS|Ia(2&l4zw*(0n$FtM7Famy~jkH7fhi^Ku>zYd>G
+zn>OLO9|-csMWo*j*x9d$m{K^1i9iYe8tD&U`+<(>_H4%YDKQlcM({+z3lvj!_Ba<a
+zfs$A(9*-xE2ar^vQ789{CstfvMr@jia`CLv>~S^hqY}e>oJA{6TY*wjv+nrt1Rm*5
+zOvCZQ9mF_e<sBzRTS1^Eq`jH###Q7oNbWD6Q{a}`3p6ruEQj`$GBaB#g?l18;%n`|
+zLGjEfWsZIb0A3&q##hgrT1mwM(To917!NUsq!zVcJkAgH4(7b^wX>%dIp{?4Gyzcb
+z0+n$5Ws@r0onZWJfdr9Sy;-rtAY2)hg2{L%=dt+lowL=k9>Th4LUnS+Bbr((5k;Th
+z633i?E8%Gwk5E=TtwwpgK$x#=vFVr}*>p593OIb7Hn~DHn^l8AmQJpc<Ah^=ad9L-
+zE2b52N}Eet@Kw`;tBWVr7&N?~BWdN4nVj|(j<1p-=5EM0{X!-a3+U{Gv>yz{Sn(t0
+z+;P>V6Dxrdd=ue?&_FsCESp%Fo^`!IH9x#EFkzNVs=>s8NS?9Y7WdDdRvw>f(LnI{
+zArK=g#^ZXsffB=NL|Ig^SQaIupFv=1%qKAD#6PI90G>a+bmiQ_HS_b=E+|~HpwNP^
+z4mnLYfA##rmGcVcOfR)1{A0I?eP;7zbBn*W&}dz|Ab-t*{EB&n#S^OxpcY+50}(u9
+zY8m55u9#Q6c0pmqJfp%d5#(dIJW0KHMrp--<MUPXOe<H;E1Z8yi8*@t+~SIPA>Y*I
+zk-2<sVgC3U{<PTf0%645uqb!cd?FC~Ie!4*S>s&nw+K^2ep1T4e$l|y3yeH*1Fl|B
+zxO8@r<xmSEZyO{CRW-vZBoxUHS@rZ|+;u&603?DzA@%b-tln(iA*hPi3e}L)goVwr
+z;)&<u%W*Z!j6o%|P}e2XqiJFm<7IRAY&@y@M#T$5FrrG$H~&FJ#Zy&Z(MrV=y2Jdg
+zdIDX6Z~PaE0Q?b+V7?Sycvn0mRoOF_-^Xwgc}@TrtkhdEPU6Xk#!rM9)MGlB*?<9n
+zg?jn}GOs`)!a`jaR%6evN(4wP85VZpdXMTUuBV?;jQ0;)#}KeYsAS18{H~4w`Ne;W
+zAs7lFR`v9=d~rN=Oyb3|I0?R;>|3j2_?IjKLAbPQ&E9UufW?jU<1O!(^?d7k9n3NK
+zRf&MjX+6WOv!71J!uviWW!3-~WALjK0TLfD`&+tXS9-HF)a!&Jp|l8%72o|42y+^u
+z=DyU^AF+f{Ft+$d;rP`dnEguYrXO^|t_`N2(?KACL+-~G|1dPaa!7buI#o|UtAbba
+zl&2hr<G)q{qeXJ8_^ywD*1Dw+gJqv5;NqGCLX>>7VzelX72k~!5GJ&Y;CLhbqFm4C
+zcd>lFs716GzVA0K3rA3V3)WcmFHZ!_oDP)82>CZ@wvPI~&j2VCO4@OhHawR*@sV^)
+z-Pq^d69L~3e8r-!xyoztI?S_D42(*pS}Irh-Oq8f<2Z<x%Qda3QDe`$Hv-IG*Yo*3
+zFUC*#Dro6QBmJVP)oP_u@qJ%J$iGs8ni_lF^$`%yV=fC*x+(khSzVvqBC0=^KhW7#
+zDpf>_qa8SY5ajX|ehzroN8ml&0p@+aSc%7DS~tJ+*Ovh;FiEwja;ehaKTvaB#t0)o
+z#0-%BeA(lt@{oQH$MD_Sb@EoOdc|_hNyNx$)D5OIKv8EVrnK;=Vxh8o&;CmI|J~MF
+z$6_(689P0>5+eY54BmASs8qb}z5<DlJ8_faMh9x;stW(wPiMw=DD5!Qeb?*n%ad<p
+z5Y;h9wE27WN~Kn+xNHP41v#q6;FmiB5<af$50t7Z2x9R#0c0VO000EmNkl<ZsT_3K
+zoby~$43zGeHOp}{W1-MrDi%w=Z*~Qa3W-F*{s(EkQjDOkUfv0+m8$uJFvh@f1BMOI
+z7%F4<gd%W4!h{z<#q<4gwZ?vbsA~Y6OqmCM1c4vqdh%i}`ISzzwTWY9f34zIOXmN=
+zZ{-+3@kGLj#k3f+<w~umuaqm4839$-w@`EaG5Dp5K(*$T%WmI5xu?Ixf*o_5SYpVs
+zFCyIT7YE9AQtD(n-9Bxq?<*ZsojVQ<^cIkaMnJYbo6cmCsbngha^mr-tB&@T4t5P3
+zIGQ_fB)9)?|69WmBhz_O@zMT+M{}J=b0cCrJh`nO?mtQPM>Tsm4CydTPf1EwU$I*C
+zMC(*Koyle$hqJxSXB{8y?9O!$aKLxsS~K<ArcUKrNJKFx`nv`seCo1+ip68eREnJ-
+zl}-T+1vZ65JjT03JkIKXeeF0}ThO#S6eKLZJ&ZL+jA17<-+~<mWGo&FArVg|5{YCY
+znT#h4HgqCEWz6^)<8hb@PE0%I(GLDP!>|q?TC96ZkxldG@V{<nR0|?X3(rVcDGd;T
+z;YPG}aDF6+#Y{%%GeH3GUNt>h>uR}{>(0A1FHkC$NNA1*>5h($QzjwC%Ru+R-h;c3
+zl#3OL!vXy`flengZEe|hpdHK*OJ&mLNu^ThbSe!tU<OJmX)xm@1ROGu81lr)QX*b|
+zY>m;vLfSqlzA~9iTQ)lgZP~WAHse5B+qm|&_V#o(o6crZnRGgnO=U9ajG;5xEbbYB
+zaqaCL;|$T>-qvPxu|{nsn*mTXkV&Vqw3JGx(yWMlCDX}dI%Tl&CuurzOd^p=n%*T7
+zrbqSu9P29<j}c4;W;`Ar0mBR-9zIw$AxtMz_(<pI8vO_(Kp$;n=#(Ma+vrpxkr<Lb
+z&iMgb{=oii2Mf81h+<a7$4@f%z)m93KK&G?k|+j)I=a8RtFyOO^L#&G_-F<oX&=P!
+zL_`6w9f#c|hI5HjB4Of%e}pWRB8r(bX-I>!nRGUtHnGlTvRS+wglyJ$3~tY|(LiUi
+z8J<)I3&}*v1U->T#FKG?H3Sk&X4==vcp_5A5<V)#2C0y5F@EE%j%j0ucqd}9csyoD
+z9ypOmCKCx-3{##;(*Y1Toz4*Nx5nvAntstudSQSbF<ysa1Po-egSah|wva_XgE~c1
+z+m^|+Ww4V8jbyUfbT*SRUYW4OjPo%k9;-hPA;2MD^c)-lX``e(*Dn{V2X-FG_2jjq
+zSnOlzOk%<W%@_%Mf8yM^r<{HoBSJ*6G92F9y?xED&TWT!4)^sP9q8}Q^>;@YA_Dk1
+zHj-vQk|H<+1Q3oe#8Bu7i#^C#$n_iA*hJmh0b796fLwo9E~KsGiQ}FDV{<6RAk6;m
+z6So!y$LMy|b;Di^497WI1bPP`272=YJ^6v&Lf%4OA>UufgL?}DR2f`A4CoK-_tzZ@
+zJvW?zFbFyL{bA8M5YjLQ4AGVAJ(@e(*}HqgzHM*pD&$JM(}_|}GSPABQYV!%={F-l
+z1syYHq{nyYSd5{ewW^e=<bLm_1G_fv+xg}@1nWaPCl~MCY3#pS@V?O7QLyRAC{<)+
+zv|6en*syQU#{He!4-NDceQs}+nfDS;q^C`1MN~@t9{>OV|NrRvt<3-c00v1!K~w_(
+X+25Li<MVIq00000NkvXXu0mjf{qr3d
+
+literal 0
+HcmV?d00001
+

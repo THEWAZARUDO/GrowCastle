@@ -41,9 +41,10 @@ public static class ScreenMatcher
         Bitmap haystack,
         Point haystackOrigin,
         Bitmap template,
-        TargetConfig cfg)
+        TargetConfig cfg,
+        CancellationToken ct = default)
     {
-        var matches = FindMatchesInternal(haystack, haystackOrigin, template, cfg, findAll: false, maxMatches: 1);
+        var matches = FindMatchesInternal(haystack, haystackOrigin, template, cfg, findAll: false, maxMatches: 1, ct);
         return matches.Count > 0 ? matches[0] : null;
     }
 
@@ -52,9 +53,10 @@ public static class ScreenMatcher
         Point haystackOrigin,
         Bitmap template,
         TargetConfig cfg,
-        int maxMatches = 64)
+        int maxMatches = 64,
+        CancellationToken ct = default)
     {
-        return FindMatchesInternal(haystack, haystackOrigin, template, cfg, findAll: true, maxMatches: maxMatches);
+        return FindMatchesInternal(haystack, haystackOrigin, template, cfg, findAll: true, maxMatches: maxMatches, ct);
     }
 
     private static unsafe List<MatchResult> FindMatchesInternal(
@@ -63,7 +65,8 @@ public static class ScreenMatcher
         Bitmap template,
         TargetConfig cfg,
         bool findAll,
-        int maxMatches)
+        int maxMatches,
+        CancellationToken ct = default)
     {
         var results = new List<MatchResult>();
         int hw = haystack.Width;
@@ -104,8 +107,8 @@ public static class ScreenMatcher
                 fgMask = BuildForegroundMask(tplPtr, tplStride, tw, th, out fgCount);
             }
 
-            // Build coarse sample points (stride across template, favoring foreground points too)
-            var coarseSamples = BuildCoarseSamples(tplPtr, tplStride, tw, th, fgMask, maxSamples: 40);
+            // Build coarse sample points (grid + high-contrast points)
+            var coarseSamples = BuildCoarseSamples(tplPtr, tplStride, tw, th, fgMask, maxSamples: 48);
 
             double threshold = Math.Clamp(cfg.Threshold, 0.40, 0.99);
             // Coarse filter is slightly looser than final threshold to avoid missing off-by-1 candidates
@@ -117,6 +120,7 @@ public static class ScreenMatcher
             int step = 2;
             for (int y = searchRect.Top; y <= maxY; y += step)
             {
+                ct.ThrowIfCancellationRequested();
                 for (int x = searchRect.Left; x <= maxX; x += step)
                 {
                     double coarseScore = ComputeCoarseScore(hayPtr, hayStride, x, y, coarseSamples);
@@ -130,22 +134,21 @@ public static class ScreenMatcher
             if (candidates.Count == 0)
                 return results;
 
-            // Evaluate refined neighborhood (+-1 px) around coarse hits
+            // Sort descending by coarse score so best candidates are always evaluated first
+            candidates.Sort((a, b) => b.score.CompareTo(a.score));
+
+            // Evaluate refined neighborhood (+-1 px) around top coarse hits
             var exactHits = new List<MatchResult>();
             var visited = new HashSet<long>();
 
-            // If only looking for single best, sort coarse candidates descending first for fast pruning
-            if (!findAll)
-            {
-                candidates.Sort((a, b) => b.score.CompareTo(a.score));
-            }
-
+            int maxCandidates = findAll ? 1200 : 200;
             double bestScoreSoFar = 0;
             int candidatesChecked = 0;
 
             foreach (var c in candidates)
             {
-                if (!findAll && candidatesChecked > 300 && bestScoreSoFar >= threshold)
+                ct.ThrowIfCancellationRequested();
+                if (candidatesChecked >= maxCandidates)
                     break;
 
                 candidatesChecked++;
@@ -167,7 +170,8 @@ public static class ScreenMatcher
                             hayPtr, hayStride,
                             tplPtr, tplStride,
                             rx, ry, tw, th,
-                            fgMask, fgCount);
+                            fgMask, fgCount,
+                            threshold);
 
                         if (score >= threshold)
                         {
@@ -178,6 +182,10 @@ public static class ScreenMatcher
                         }
                     }
                 }
+
+                // Once we have a strong match above threshold and checked top 60 candidates, stop early
+                if (!findAll && bestScoreSoFar >= threshold && candidatesChecked >= 60)
+                    break;
             }
 
             if (exactHits.Count == 0)
@@ -229,7 +237,8 @@ public static class ScreenMatcher
     public static unsafe List<MatchResult> FindBlueBarBlobs(
         Bitmap haystack,
         Point haystackOrigin,
-        NormalizedRect? roi = null)
+        NormalizedRect? roi = null,
+        CancellationToken ct = default)
     {
         int hw = haystack.Width;
         int hh = haystack.Height;
@@ -251,6 +260,7 @@ public static class ScreenMatcher
 
             for (int y = 0; y < rh; y++)
             {
+                ct.ThrowIfCancellationRequested();
                 byte* row = ptr + (searchRect.Top + y) * stride + searchRect.Left * 3;
                 int rowOffset = y * rw;
                 for (int x = 0; x < rw; x++)
@@ -636,10 +646,14 @@ public static class ScreenMatcher
         int tw,
         int th,
         bool[]? fgMask,
-        int fgCount)
+        int fgCount,
+        double threshold)
     {
         long totalErr = 0;
         long fgErr = 0;
+        double totalMaxErr = tw * th * 3.0 * 255.0;
+        bool useFg = fgMask != null && fgCount >= 10;
+        double fgMaxErr = useFg ? fgCount * 3.0 * 255.0 : 1.0;
 
         for (int y = 0; y < th; y++)
         {
@@ -654,18 +668,31 @@ public static class ScreenMatcher
                           Math.Abs(hRow[i3 + 2] - tRow[i3 + 2]);
 
                 totalErr += err;
-                if (fgMask != null && fgMask[y * tw + x])
+                if (useFg && fgMask![y * tw + x])
                 {
                     fgErr += err;
                 }
             }
+
+            // Exact upper-bound pruning every 4 rows: even if all remaining pixels have 0 error,
+            // can this candidate still reach `threshold`?
+            if ((y & 3) == 3)
+            {
+                double maxOverall = 1.0 - (totalErr / totalMaxErr);
+                double maxScore = useFg
+                    ? 0.40 * maxOverall + 0.60 * (1.0 - (fgErr / fgMaxErr))
+                    : maxOverall;
+
+                if (maxScore < threshold)
+                    return maxScore;
+            }
         }
 
-        double overallScore = 1.0 - (totalErr / (tw * th * 3.0 * 255.0));
-        if (fgMask == null || fgCount < 10)
+        double overallScore = 1.0 - (totalErr / totalMaxErr);
+        if (!useFg)
             return overallScore;
 
-        double fgScore = 1.0 - (fgErr / (fgCount * 3.0 * 255.0));
+        double fgScore = 1.0 - (fgErr / fgMaxErr);
         return 0.40 * overallScore + 0.60 * fgScore;
     }
 

@@ -13,14 +13,14 @@
   "project": {
     "version": "1.0.0",
     "restore": {
-      "projectUniqueName": "D:\\Codes\\GrowCastle\\GrowCastleAuto.csproj",
+      "projectUniqueName": "D:\\Codes\\GrowCastle\\GrowCastle\\GrowCastleAuto.csproj",
       "projectName": "GrowCastleAuto",
-      "projectPath": "D:\\Codes\\GrowCastle\\GrowCastleAuto.csproj",
+      "projectPath": "D:\\Codes\\GrowCastle\\GrowCastle\\GrowCastleAuto.csproj",
       "packagesPath": "C:\\Users\\HOME\\AppData\\Local\\Temp\\dotnet_home\\.nuget\\packages\\",
-      "outputPath": "D:\\Codes\\GrowCastle\\obj\\",
+      "outputPath": "D:\\Codes\\GrowCastle\\GrowCastle\\obj\\",
       "projectStyle": "PackageReference",
       "configFilePaths": [
-        "C:\\Users\\HOME\\AppData\\Roaming\\NuGet\\NuGet.Config",
+        "C:\\Users\\HOME\\AppData\\Local\\Temp\\appdata\\NuGet\\NuGet.Config",
         "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.Offline.config"
       ],
       "originalTargetFrameworks": [

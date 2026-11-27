@@ -34,113 +34,127 @@ public sealed class WorkflowRunner
         _stats.Dismantled = 0;
         UpdateStep("Bắt đầu quy trình...");
 
+        int consecutiveFailures = 0;
+        int longPauseMinLoops = Math.Max(1, config.LongPauseEveryMinLoops);
+        int longPauseMaxLoops = Math.Max(longPauseMinLoops, config.LongPauseEveryMaxLoops);
+        int loopsUntilLongPause = Random.Shared.Next(longPauseMinLoops, longPauseMaxLoops + 1);
+
         try
         {
             while (!ct.IsCancellationRequested)
             {
                 int loopNum = _stats.Loops + 1;
                 _log($"=== Bắt đầu vòng #{loopNum} ===");
+                if (config.AutoFocusGameWindow && !string.IsNullOrWhiteSpace(config.TargetWindowTitle))
+                    Win32.BringWindowToFrontByTitle(config.TargetWindowTitle);
 
-                // Bước 1: Nhấn Icon 1 (Tượng rồng)
-                UpdateStep($"Vòng #{loopNum} - Bước 1: Tìm & nhấn Icon 1");
-                var m1 = await WaitAndFindAsync(config, templates, TargetKey.Step1DragonIcon, ct);
-                await HumanMouse.MoveAndClickAsync(m1.ScreenBounds, config, fastMode: false, ct);
-                _log($"[Bước 1] Đã nhấn Icon 1 ({m1.Score:P0})");
-                await RandomStepDelayAsync(config, "Sau Bước 1", ct);
-
-                // Bước 2: Nhấn Rồng huyền thoại
-                UpdateStep($"Vòng #{loopNum} - Bước 2: Tìm & nhấn Rồng huyền thoại");
-                var m2 = await WaitAndFindAsync(config, templates, TargetKey.Step2LegendaryDragon, ct);
-                await HumanMouse.MoveAndClickAsync(m2.ScreenBounds, config, fastMode: false, ct);
-                _log($"[Bước 2] Đã nhấn Rồng huyền thoại ({m2.Score:P0})");
-                await RandomStepDelayAsync(config, "Sau Bước 2", ct);
-
-                // Bước 3: Nhấn BATTLE
-                UpdateStep($"Vòng #{loopNum} - Bước 3: Tìm & nhấn BATTLE");
-                var m3 = await WaitAndFindAsync(config, templates, TargetKey.Step3BattleButton, ct);
-                await HumanMouse.MoveAndClickAsync(m3.ScreenBounds, config, fastMode: false, ct);
-                _log($"[Bước 3] Đã nhấn BATTLE ({m3.Score:P0})");
-                await RandomStepDelayAsync(config, "Sau Bước 3", ct);
-
-                // Bước 3.5: Kiểm tra mini-game "Kim cương ở đâu?"
-                if (config.MiniGameEnabled)
+                try
                 {
-                    bool handled = await TryHandleMiniGameAsync(config, templates, loopNum, ct);
-                    if (handled)
-                        await RandomStepDelayAsync(config, "Sau mini-game", ct);
-                }
 
-                // Bước 4: Tìm và nhấn toàn bộ thanh màu xanh lam (~50ms + random)
-                UpdateStep($"Vòng #{loopNum} - Bước 4: Đang tìm các thanh màu xanh lam");
-                if (config.BlueBarAppearDelayMs > 0)
-                {
-                    int appearWait = config.BlueBarAppearDelayMs + Random.Shared.Next(0, 180);
-                    await Task.Delay(appearWait, ct);
-                }
+                    // Bước 1: Nhấn Icon 1 (Tượng rồng)
+                    UpdateStep($"Vòng #{loopNum} - Bước 1: Tìm & nhấn Icon 1");
+                    var m1 = await WaitAndFindAsync(config, templates, TargetKey.Step1DragonIcon, ct);
+                    await HumanMouse.MoveAndClickAsync(m1.ScreenBounds, config, fastMode: false, ct);
+                    _log($"[Bước 1] Đã nhấn Icon 1 ({m1.Score:P0})");
+                    await RandomStepDelayAsync(config, "Sau Bước 1", ct);
 
-                var blueBars = await WaitAndFindAllBlueBarsAsync(config, templates, ct);
-                var orderedBars = OrderBlueBars(blueBars, config.BlueBarOrder);
-                _log($"[Bước 4] Tìm thấy {orderedBars.Count} thanh màu xanh lam. Bắt đầu nhấn mỗi thanh 1 lần...");
+                    // Bước 2: Nhấn Rồng huyền thoại
+                    UpdateStep($"Vòng #{loopNum} - Bước 2: Tìm & nhấn Rồng huyền thoại");
+                    var m2 = await WaitAndFindAsync(config, templates, TargetKey.Step2LegendaryDragon, ct);
+                    await HumanMouse.MoveAndClickAsync(m2.ScreenBounds, config, fastMode: false, ct);
+                    _log($"[Bước 2] Đã nhấn Rồng huyền thoại ({m2.Score:P0})");
+                    await RandomStepDelayAsync(config, "Sau Bước 2", ct);
 
-                for (int i = 0; i < orderedBars.Count; i++)
-                {
-                    ct.ThrowIfCancellationRequested();
-                    await HumanMouse.MoveAndClickAsync(orderedBars[i].ScreenBounds, config, fastMode: true, ct);
+                    // Bước 3: Nhấn BATTLE
+                    UpdateStep($"Vòng #{loopNum} - Bước 3: Tìm & nhấn BATTLE");
+                    var m3 = await WaitAndFindAsync(config, templates, TargetKey.Step3BattleButton, ct);
+                    await ClickUntilGoneAsync(config, templates, TargetKey.Step3BattleButton, m3, 1, "BATTLE", ct);
+                    _log($"[Bước 3] Đã nhấn BATTLE ({m3.Score:P0})");
 
-                    if (i < orderedBars.Count - 1)
+                    // Bước 3.5 + 4: dò SONG SONG mini-game "Kim cương ở đâu?" và thanh màu xanh lam.
+                    // Ngay sau BATTLE, mỗi lần quét cùng lúc tìm nút START và các thanh xanh, cái nào
+                    // xuất hiện trước thì xử lý trước (không chờ cố định, không chờ tuần tự).
+                    UpdateStep($"Vòng #{loopNum} - Bước 4: Dò mini-game & thanh màu xanh lam");
+                    var blueBars = await WaitForBlueBarsOrMiniGameAsync(config, templates, loopNum, ct);
+                    var orderedBars = OrderBlueBars(blueBars, config.BlueBarOrder);
+                    _log($"[Bước 4] Tìm thấy {orderedBars.Count} thanh màu xanh lam. Bắt đầu nhấn mỗi thanh 1 lần...");
+
+                    for (int i = 0; i < orderedBars.Count; i++)
                     {
-                        int minMs = Math.Max(10, config.BlueBarDelayMinMs);
-                        int maxMs = Math.Max(minMs, config.BlueBarDelayMaxMs);
-                        int delayMs = Random.Shared.Next(minMs, maxMs + 1);
-                        await PreciseDelayMsAsync(delayMs, ct);
+                        ct.ThrowIfCancellationRequested();
+                        await HumanMouse.MoveAndClickAsync(orderedBars[i].ScreenBounds, config, fastMode: true, ct);
+
+                        if (i < orderedBars.Count - 1)
+                        {
+                            int minMs = Math.Max(10, config.BlueBarDelayMinMs);
+                            int maxMs = Math.Max(minMs, config.BlueBarDelayMaxMs);
+                            int delayMs = Random.Shared.Next(minMs, maxMs + 1);
+                            await PreciseDelayMsAsync(delayMs, ct);
+                        }
                     }
+                    _log($"[Bước 4] Đã nhấn xong toàn bộ {orderedBars.Count} thanh màu xanh lam.");
+
+                    // Bước 5: Chờ ~3 giây
+                    double waitBattleSec = config.WaitAfterBlueBarsMinSeconds +
+                        Random.Shared.NextDouble() * Math.Max(0, config.WaitAfterBlueBarsMaxSeconds - config.WaitAfterBlueBarsMinSeconds);
+                    UpdateStep($"Vòng #{loopNum} - Bước 5: Chờ {waitBattleSec:F2}s");
+                    _log($"[Bước 5] Chờ {waitBattleSec:F2}s...");
+                    await Task.Delay(TimeSpan.FromSeconds(waitBattleSec), ct);
+
+                    // Bước 6: Liên tục track trong 2 giây xem cả 2 dòng Trắng & Đỏ có xuất hiện không
+                    double trackSec = Math.Max(0.3, config.LootTrackDurationSeconds);
+                    UpdateStep($"Vòng #{loopNum} - Bước 6: Track Trắng & Đỏ ({trackSec:F1}s)");
+                    var (foundBoth, claimMatch, dismantleMatch, scansCount) =
+                        await TrackCooldownLinesAsync(config, templates, trackSec, ct);
+
+                    if (foundBoth)
+                    {
+                        _log($"[Bước 6] Phát hiện CẢ 2 \"Giảm hồi chiêu\" (Trắng & Đỏ) sau {scansCount} lần quét -> Nhấn NHẬN!");
+                        await ClickUntilGoneAsync(config, templates, TargetKey.Step6ClaimButton, claimMatch, 1, "NHẬN", ct);
+                        _stats.Claimed++;
+                        _log($"[Bước 6] -> Đã nhấn NHẬN! (Tổng nhận: {_stats.Claimed})");
+                    }
+                    else
+                    {
+                        _log($"[Bước 6] Hết {trackSec:F1}s ({scansCount} lần quét): Không thấy đủ 2 dòng Trắng & Đỏ -> Nhấn PHÂN RÃ 2 lần!");
+                        await ClickUntilGoneAsync(config, templates, TargetKey.Step6DismantleButton, dismantleMatch, 2, "PHÂN RÃ", ct);
+
+                        _stats.Dismantled++;
+                        _log($"[Bước 6] -> Đã nhấn PHÂN RÃ 2 lần! (Tổng phân rã: {_stats.Dismantled})");
+                    }
+
+                    // Bước 7: Chờ ~0.1 giây rồi lặp lại từ bước 1
+                    _stats.Loops++;
+                    double repeatWaitSec = config.WaitBeforeRepeatMinSeconds +
+                        Random.Shared.NextDouble() * Math.Max(0, config.WaitBeforeRepeatMaxSeconds - config.WaitBeforeRepeatMinSeconds);
+                    int repeatWaitMs = Math.Max(20, (int)Math.Round(repeatWaitSec * 1000.0));
+                    UpdateStep($"Xong vòng #{loopNum} - Chờ {repeatWaitSec:F2}s lặp lại");
+                    _log($"[Bước 7] Hoàn tất vòng #{loopNum}. Chờ {repeatWaitSec:F2}s ({repeatWaitMs}ms) rồi lặp lại...");
+                    await PreciseDelayMsAsync(repeatWaitMs, ct);
+
+                    loopsUntilLongPause--;
+                    if (loopsUntilLongPause <= 0)
+                    {
+                        double pauseSeconds = Math.Max(0, config.LongPauseDurationSeconds);
+                        UpdateStep($"Nghỉ định kỳ {pauseSeconds:F1}s sau {longPauseMinLoops}-{longPauseMaxLoops} vòng");
+                        _log($"[Nghỉ định kỳ] Đã hoàn tất khoảng nghỉ {longPauseMinLoops}-{longPauseMaxLoops} vòng. Tạm dừng {pauseSeconds:F1}s...");
+                        await Task.Delay(TimeSpan.FromSeconds(pauseSeconds), ct);
+
+                        loopsUntilLongPause = Random.Shared.Next(longPauseMinLoops, longPauseMaxLoops + 1);
+                    }
+
+                    consecutiveFailures = 0;
                 }
-                _log($"[Bước 4] Đã nhấn xong toàn bộ {orderedBars.Count} thanh màu xanh lam.");
-
-                // Bước 5: Chờ ~3 giây
-                double waitBattleSec = config.WaitAfterBlueBarsMinSeconds +
-                    Random.Shared.NextDouble() * Math.Max(0, config.WaitAfterBlueBarsMaxSeconds - config.WaitAfterBlueBarsMinSeconds);
-                UpdateStep($"Vòng #{loopNum} - Bước 5: Chờ {waitBattleSec:F2}s");
-                _log($"[Bước 5] Chờ {waitBattleSec:F2}s...");
-                await Task.Delay(TimeSpan.FromSeconds(waitBattleSec), ct);
-
-                // Bước 6: Liên tục track trong 2 giây xem cả 2 dòng Trắng & Đỏ có xuất hiện không
-                double trackSec = Math.Max(0.3, config.LootTrackDurationSeconds);
-                UpdateStep($"Vòng #{loopNum} - Bước 6: Track Trắng & Đỏ ({trackSec:F1}s)");
-                var (foundBoth, claimMatch, dismantleMatch, scansCount) =
-                    await TrackCooldownLinesAsync(config, templates, trackSec, ct);
-
-                if (foundBoth)
+                catch (TimeoutException ex)
                 {
-                    _log($"[Bước 6] Phát hiện CẢ 2 \"Giảm hồi chiêu\" (Trắng & Đỏ) sau {scansCount} lần quét -> Nhấn NHẬN!");
-                    claimMatch ??= await WaitAndFindAsync(config, templates, TargetKey.Step6ClaimButton, ct);
+                    consecutiveFailures++;
+                    _log($"[Cảnh báo] {ex.Message} (lỗi liên tiếp {consecutiveFailures}/{config.MaxConsecutiveFailures})");
+                    if (consecutiveFailures >= Math.Max(1, config.MaxConsecutiveFailures))
+                        throw;
 
-                    await HumanMouse.MoveAndClickAsync(claimMatch.ScreenBounds, config, fastMode: false, ct);
-                    _stats.Claimed++;
-                    _log($"[Bước 6] -> Đã nhấn NHẬN! (Tổng nhận: {_stats.Claimed})");
+                    UpdateStep($"Vòng #{loopNum} - Không thấy mục tiêu, thử lại từ bước 1...");
+                    await PreciseDelayMsAsync(Random.Shared.Next(1200, 2200), ct);
                 }
-                else
-                {
-                    _log($"[Bước 6] Hết {trackSec:F1}s ({scansCount} lần quét): Không thấy đủ 2 dòng Trắng & Đỏ -> Nhấn PHÂN RÃ 2 lần!");
-                    dismantleMatch ??= await WaitAndFindAsync(config, templates, TargetKey.Step6DismantleButton, ct);
-
-                    await HumanMouse.MoveAndClickAsync(dismantleMatch.ScreenBounds, config, fastMode: false, ct);
-                    int doubleClickGapMs = Random.Shared.Next(110, 210);
-                    await PreciseDelayMsAsync(doubleClickGapMs, ct);
-                    await HumanMouse.MoveAndClickAsync(dismantleMatch.ScreenBounds, config, fastMode: true, ct);
-
-                    _stats.Dismantled++;
-                    _log($"[Bước 6] -> Đã nhấn PHÂN RÃ 2 lần! (Tổng phân rã: {_stats.Dismantled})");
-                }
-
-                // Bước 7: Chờ ~0.1 giây rồi lặp lại từ bước 1
-                _stats.Loops++;
-                double repeatWaitSec = config.WaitBeforeRepeatMinSeconds +
-                    Random.Shared.NextDouble() * Math.Max(0, config.WaitBeforeRepeatMaxSeconds - config.WaitBeforeRepeatMinSeconds);
-                int repeatWaitMs = Math.Max(20, (int)Math.Round(repeatWaitSec * 1000.0));
-                UpdateStep($"Xong vòng #{loopNum} - Chờ {repeatWaitSec:F2}s lặp lại");
-                _log($"[Bước 7] Hoàn tất vòng #{loopNum}. Chờ {repeatWaitSec:F2}s ({repeatWaitMs}ms) rồi lặp lại...");
-                await PreciseDelayMsAsync(repeatWaitMs, ct);
             }
         }
         finally
@@ -197,7 +211,7 @@ public sealed class WorkflowRunner
             ct.ThrowIfCancellationRequested();
             Rectangle bounds = ScreenMatcher.ResolveCaptureBounds(config);
             using var screen = ScreenMatcher.CaptureScreen(bounds);
-            var match = ScreenMatcher.FindBestMatch(screen, bounds.Location, tpl, cfg);
+            var match = ScreenMatcher.FindBestMatch(screen, bounds.Location, tpl, cfg, ct);
             if (match != null)
                 return match;
 
@@ -207,13 +221,37 @@ public sealed class WorkflowRunner
         throw new TimeoutException($"Không tìm thấy '{cfg.DisplayName}' trên màn hình sau {config.WaitForMatchTimeoutMs / 1000.0:F1}s.");
     }
 
-    private async Task<List<MatchResult>> WaitAndFindAllBlueBarsAsync(
+    private static List<MatchResult> FindBlueBars(
         AppConfig config,
         Dictionary<TargetKey, Bitmap> templates,
+        TargetConfig cfg,
+        Bitmap screen,
+        Rectangle bounds,
         CancellationToken ct)
     {
-        var cfg = config.GetTarget(TargetKey.Step4BlueBar);
-        var deadline = DateTime.UtcNow.AddMilliseconds(Math.Max(2000, config.WaitForMatchTimeoutMs));
+        return config.BlueBarMode == BlueBarDetectMode.BlueColorBlob
+            ? ScreenMatcher.FindBlueBarBlobs(screen, bounds.Location, cfg.SearchRoi, ct)
+            : ScreenMatcher.FindAllMatches(screen, bounds.Location, templates[TargetKey.Step4BlueBar], cfg, maxMatches: 64, ct: ct);
+    }
+
+    /// <summary>
+    /// Scans the screen in ONE loop for both the mini-game START button and the blue bars.
+    /// Whichever shows up first is handled first: if START appears the mini-game is played and the
+    /// scan continues; as soon as blue bars are visible they are returned (no fixed waiting).
+    /// </summary>
+    private async Task<List<MatchResult>> WaitForBlueBarsOrMiniGameAsync(
+        AppConfig config,
+        Dictionary<TargetKey, Bitmap> templates,
+        int loopNum,
+        CancellationToken ct)
+    {
+        var barCfg = config.GetTarget(TargetKey.Step4BlueBar);
+        bool watchMiniGame = config.MiniGameEnabled && templates.ContainsKey(TargetKey.MiniGameStartButton);
+        TargetConfig? startCfg = watchMiniGame ? config.GetTarget(TargetKey.MiniGameStartButton) : null;
+        Bitmap? startTpl = watchMiniGame ? templates[TargetKey.MiniGameStartButton] : null;
+
+        int timeoutMs = Math.Max(2000, config.WaitForMatchTimeoutMs);
+        var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
 
         while (DateTime.UtcNow < deadline)
         {
@@ -221,24 +259,46 @@ public sealed class WorkflowRunner
             Rectangle bounds = ScreenMatcher.ResolveCaptureBounds(config);
             using var screen = ScreenMatcher.CaptureScreen(bounds);
 
-            List<MatchResult> matches = config.BlueBarMode == BlueBarDetectMode.BlueColorBlob
-                ? ScreenMatcher.FindBlueBarBlobs(screen, bounds.Location, cfg.SearchRoi)
-                : ScreenMatcher.FindAllMatches(screen, bounds.Location, templates[TargetKey.Step4BlueBar], cfg, maxMatches: 64);
+            var matches = FindBlueBars(config, templates, barCfg, screen, bounds, ct);
+
+            // If 2+ blue bars are already visible, we are definitely in battle (mini-game has at most 1 blue diamond)
+            if (matches.Count >= 2)
+            {
+                await Task.Delay(60, ct);
+                Rectangle bounds2 = ScreenMatcher.ResolveCaptureBounds(config);
+                using var screen2 = ScreenMatcher.CaptureScreen(bounds2);
+                var stable = FindBlueBars(config, templates, barCfg, screen2, bounds2, ct);
+                return stable.Count >= matches.Count ? stable : matches;
+            }
+
+            // Otherwise (0 or 1 blue blob), check if the mini-game START button is open
+            if (watchMiniGame)
+            {
+                var start = ScreenMatcher.FindBestMatch(screen, bounds.Location, startTpl!, startCfg!, ct);
+                if (start != null)
+                {
+                    await HandleMiniGameAsync(config, templates, start, loopNum, ct);
+                    UpdateStep($"Vòng #{loopNum} - Bước 4: Dò thanh màu xanh lam");
+                    deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+                    continue;
+                }
+            }
 
             if (matches.Count > 0)
             {
-                // Small stabilization wait so all bars finish rendering if first frame just appeared
-                await Task.Delay(120, ct);
+                await Task.Delay(60, ct);
                 Rectangle bounds2 = ScreenMatcher.ResolveCaptureBounds(config);
                 using var screen2 = ScreenMatcher.CaptureScreen(bounds2);
-                var stableMatches = config.BlueBarMode == BlueBarDetectMode.BlueColorBlob
-                    ? ScreenMatcher.FindBlueBarBlobs(screen2, bounds2.Location, cfg.SearchRoi)
-                    : ScreenMatcher.FindAllMatches(screen2, bounds2.Location, templates[TargetKey.Step4BlueBar], cfg, maxMatches: 64);
 
-                return stableMatches.Count >= matches.Count ? stableMatches : matches;
+                if (watchMiniGame &&
+                    ScreenMatcher.FindBestMatch(screen2, bounds2.Location, startTpl!, startCfg!, ct) != null)
+                    continue;
+
+                var stable = FindBlueBars(config, templates, barCfg, screen2, bounds2, ct);
+                return stable.Count >= matches.Count ? stable : matches;
             }
 
-            await Task.Delay(120, ct);
+            await Task.Delay(35, ct);
         }
 
         throw new TimeoutException($"Không tìm thấy thanh màu xanh lam nào sau {config.WaitForMatchTimeoutMs / 1000.0:F1}s.");
@@ -261,38 +321,18 @@ public sealed class WorkflowRunner
     private const int MiniGameSlotHalfHeight = 40;
 
     /// <summary>
-    /// Checks if the "Kim cương ở đâu?" mini-game appeared after BATTLE.
-    /// If found: clicks START, waits for the shuffle, then watches each of the 8 stumps separately
-    /// and clicks the one that keeps spinning. Returns true if the mini-game was detected.
+    /// Plays the "Kim cương ở đâu?" mini-game once its START button has been detected:
+    /// clicks START, then watches each of the 8 stumps separately and clicks the one that keeps spinning.
     /// </summary>
-    private async Task<bool> TryHandleMiniGameAsync(
+    private async Task HandleMiniGameAsync(
         AppConfig config,
         Dictionary<TargetKey, Bitmap> templates,
+        MatchResult startMatch,
         int loopNum,
         CancellationToken ct)
     {
-        if (!templates.ContainsKey(TargetKey.MiniGameStartButton))
-            return false;
-
         var startCfg = config.GetTarget(TargetKey.MiniGameStartButton);
         var startTpl = templates[TargetKey.MiniGameStartButton];
-        var deadline = DateTime.UtcNow.AddMilliseconds(Math.Max(500, config.MiniGameCheckTimeoutMs));
-
-        // Quick check: is the START button visible?
-        MatchResult? startMatch = null;
-        while (DateTime.UtcNow < deadline)
-        {
-            ct.ThrowIfCancellationRequested();
-            Rectangle bounds = ScreenMatcher.ResolveCaptureBounds(config);
-            using var screen = ScreenMatcher.CaptureScreen(bounds);
-            startMatch = ScreenMatcher.FindBestMatch(screen, bounds.Location, startTpl, startCfg);
-            if (startMatch != null)
-                break;
-            await Task.Delay(100, ct);
-        }
-
-        if (startMatch == null)
-            return false; // No mini-game appeared, continue normally
 
         _log($"[Mini-game] Phát hiện mini-game \"Kim cương ở đâu?\" (START: {startMatch.Score:P0})");
         UpdateStep($"Vòng #{loopNum} - Mini-game: Nhấn START");
@@ -325,7 +365,7 @@ public sealed class WorkflowRunner
         if (!captureBounds.Contains(ring))
         {
             _log("[Mini-game] Vùng 8 hộp nằm ngoài cửa sổ game (kiểm tra MiniGameLayoutScale). Bỏ qua mini-game.");
-            return true;
+            return;
         }
 
         _log("[Mini-game] Đã nhấn START. Chờ xáo trộn...");
@@ -425,7 +465,7 @@ public sealed class WorkflowRunner
         if (chosen < 0)
         {
             _log("[Mini-game] Không tìm thấy hộp nào quay liên tục. Bỏ qua mini-game.");
-            return true;
+            return;
         }
 
         _log($"[Mini-game] Đã nhấn hộp quay #{chosen + 1}.");
@@ -440,7 +480,7 @@ public sealed class WorkflowRunner
             ct.ThrowIfCancellationRequested();
             Rectangle bounds = ScreenMatcher.ResolveCaptureBounds(config);
             using var screen = ScreenMatcher.CaptureScreen(bounds);
-            stillOpen = ScreenMatcher.FindBestMatch(screen, bounds.Location, startTpl, startCfg) != null;
+            stillOpen = ScreenMatcher.FindBestMatch(screen, bounds.Location, startTpl, startCfg, ct) != null;
             if (!stillOpen)
                 break;
             await Task.Delay(200, ct);
@@ -450,7 +490,7 @@ public sealed class WorkflowRunner
             ? "[Mini-game] Cảnh báo: nút START vẫn còn trên màn hình, mini-game có thể chưa đóng."
             : "[Mini-game] Mini-game đã đóng. Hoàn tất.");
 
-        return true;
+        return;
     }
 
     /// <summary>
@@ -514,6 +554,93 @@ public sealed class WorkflowRunner
         return hits >= 2;
     }
 
+    private static MatchResult? FindNow(AppConfig config, Bitmap tpl, TargetConfig cfg, CancellationToken ct)
+    {
+        Rectangle bounds = ScreenMatcher.ResolveCaptureBounds(config);
+        using var screen = ScreenMatcher.CaptureScreen(bounds);
+        return ScreenMatcher.FindBestMatch(screen, bounds.Location, tpl, cfg, ct);
+    }
+
+    private static bool IsStillVisibleAt(Rectangle localBounds, Bitmap tpl, TargetConfig cfg, CancellationToken ct)
+    {
+        var probeRect = localBounds;
+        probeRect.Inflate(16, 16);
+        var vs = Win32.GetVirtualScreenBounds();
+        probeRect = Rectangle.Intersect(vs, probeRect);
+        if (probeRect.Width < tpl.Width || probeRect.Height < tpl.Height)
+            return false;
+
+        using var crop = ScreenMatcher.CaptureScreen(probeRect);
+        var localCfg = new TargetConfig
+        {
+            Key = cfg.Key,
+            Threshold = cfg.Threshold,
+            RequireColorMatch = cfg.RequireColorMatch,
+            SearchRoi = null
+        };
+        return ScreenMatcher.FindBestMatch(crop, probeRect.Location, tpl, localCfg, ct) != null;
+    }
+
+    /// <summary>
+    /// Clicks a button and checks that it disappeared. If it is still on screen the click did not
+    /// register (game not focused, click too fast...), so click again, up to ClickRetryMax times.
+    /// The button position is refreshed right before retry attempts.
+    /// </summary>
+    private async Task<MatchResult> ClickUntilGoneAsync(
+        AppConfig config,
+        Dictionary<TargetKey, Bitmap> templates,
+        TargetKey key,
+        MatchResult? knownMatch,
+        int clicksPerAttempt,
+        string label,
+        CancellationToken ct)
+    {
+        var cfg = config.GetTarget(key);
+        var tpl = templates[key];
+        var target = knownMatch ?? await WaitAndFindAsync(config, templates, key, ct);
+        int maxAttempts = config.VerifyClicks ? Math.Max(1, config.ClickRetryMax) : 1;
+
+        for (int attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            if (attempt > 1)
+            {
+                if (config.AutoFocusGameWindow && !string.IsNullOrWhiteSpace(config.TargetWindowTitle))
+                    Win32.BringWindowToFrontByTitle(config.TargetWindowTitle);
+
+                var fresh = FindNow(config, tpl, cfg, ct);
+                if (fresh != null)
+                    target = fresh;
+            }
+
+            for (int c = 0; c < clicksPerAttempt; c++)
+            {
+                await HumanMouse.MoveAndClickAsync(target.ScreenBounds, config, fastMode: c > 0, ct);
+                if (c < clicksPerAttempt - 1)
+                    await PreciseDelayMsAsync(Random.Shared.Next(110, 210), ct);
+            }
+
+            if (!config.VerifyClicks)
+                return target;
+
+            // Fast local check (~1-2ms) until the button disappears
+            var verifyDeadline = DateTime.UtcNow.AddMilliseconds(Math.Max(300, config.ClickVerifyTimeoutMs));
+            while (DateTime.UtcNow < verifyDeadline)
+            {
+                await Task.Delay(35, ct);
+                if (!IsStillVisibleAt(target.ScreenBounds, tpl, cfg, ct))
+                    return target;
+            }
+
+            if (attempt < maxAttempts)
+                _log($"[Thử lại] Nút {label} vẫn còn sau khi nhấn (lần {attempt}/{maxAttempts}). Nhấn lại...");
+        }
+
+        _log($"[Cảnh báo] Nút {label} vẫn còn sau {maxAttempts} lần nhấn. Tiếp tục quy trình.");
+        return target;
+    }
+
     private async Task<(bool FoundBoth, MatchResult? Claim, MatchResult? Dismantle, int ScansCount)>
         TrackCooldownLinesAsync(
             AppConfig config,
@@ -521,8 +648,6 @@ public sealed class WorkflowRunner
             double trackDurationSeconds,
             CancellationToken ct)
     {
-        var claimCfg = config.GetTarget(TargetKey.Step6ClaimButton);
-        var dismantleCfg = config.GetTarget(TargetKey.Step6DismantleButton);
         var whiteCfg = config.GetTarget(TargetKey.Step6CooldownWhite);
         var redCfg = config.GetTarget(TargetKey.Step6CooldownRed);
 
@@ -539,11 +664,9 @@ public sealed class WorkflowRunner
             Rectangle bounds = ScreenMatcher.ResolveCaptureBounds(config);
             using var screen = ScreenMatcher.CaptureScreen(bounds);
 
-            var whiteCd = ScreenMatcher.FindBestMatch(screen, bounds.Location, templates[TargetKey.Step6CooldownWhite], whiteCfg);
-            var redCd = ScreenMatcher.FindBestMatch(screen, bounds.Location, templates[TargetKey.Step6CooldownRed], redCfg);
+            var whiteCd = ScreenMatcher.FindBestMatch(screen, bounds.Location, templates[TargetKey.Step6CooldownWhite], whiteCfg, ct);
+            var redCd = ScreenMatcher.FindBestMatch(screen, bounds.Location, templates[TargetKey.Step6CooldownRed], redCfg, ct);
 
-            lastClaim = ScreenMatcher.FindBestMatch(screen, bounds.Location, templates[TargetKey.Step6ClaimButton], claimCfg) ?? lastClaim;
-            lastDismantle = ScreenMatcher.FindBestMatch(screen, bounds.Location, templates[TargetKey.Step6DismantleButton], dismantleCfg) ?? lastDismantle;
 
             if (whiteCd != null && redCd != null)
             {

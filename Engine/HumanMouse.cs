@@ -163,8 +163,15 @@ public static class HumanMouse
         try
         {
             Win32.LeftDown();
-            await Task.Delay(holdMs, ct);
-            Win32.LeftUp();
+            try
+            {
+                await Task.Delay(holdMs, ct);
+            }
+            finally
+            {
+                // Always release, even if the run was cancelled while the button was held down
+                Win32.LeftUp();
+            }
         }
         finally
         {

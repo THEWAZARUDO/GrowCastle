@@ -1,0 +1,416 @@
+diff --git a/Engine/HumanMouse.cs b/Engine/HumanMouse.cs
+index 0d7092c..bcfba2a 100644
+--- a/Engine/HumanMouse.cs
++++ b/Engine/HumanMouse.cs
+@@ -163,8 +163,15 @@ public static class HumanMouse
+         try
+         {
+             Win32.LeftDown();
+-            await Task.Delay(holdMs, ct);
+-            Win32.LeftUp();
++            try
++            {
++                await Task.Delay(holdMs, ct);
++            }
++            finally
++            {
++                // Always release, even if the run was cancelled while the button was held down
++                Win32.LeftUp();
++            }
+         }
+         finally
+         {
+diff --git a/Engine/ScreenMatcher.cs b/Engine/ScreenMatcher.cs
+index dfdf369..bf4efe6 100644
+--- a/Engine/ScreenMatcher.cs
++++ b/Engine/ScreenMatcher.cs
+@@ -41,9 +41,10 @@ public static class ScreenMatcher
+         Bitmap haystack,
+         Point haystackOrigin,
+         Bitmap template,
+-        TargetConfig cfg)
++        TargetConfig cfg,
++        CancellationToken ct = default)
+     {
+-        var matches = FindMatchesInternal(haystack, haystackOrigin, template, cfg, findAll: false, maxMatches: 1);
++        var matches = FindMatchesInternal(haystack, haystackOrigin, template, cfg, findAll: false, maxMatches: 1, ct);
+         return matches.Count > 0 ? matches[0] : null;
+     }
+ 
+@@ -52,9 +53,10 @@ public static class ScreenMatcher
+         Point haystackOrigin,
+         Bitmap template,
+         TargetConfig cfg,
+-        int maxMatches = 64)
++        int maxMatches = 64,
++        CancellationToken ct = default)
+     {
+-        return FindMatchesInternal(haystack, haystackOrigin, template, cfg, findAll: true, maxMatches: maxMatches);
++        return FindMatchesInternal(haystack, haystackOrigin, template, cfg, findAll: true, maxMatches: maxMatches, ct);
+     }
+ 
+     private static unsafe List<MatchResult> FindMatchesInternal(
+@@ -63,7 +65,8 @@ public static class ScreenMatcher
+         Bitmap template,
+         TargetConfig cfg,
+         bool findAll,
+-        int maxMatches)
++        int maxMatches,
++        CancellationToken ct = default)
+     {
+         var results = new List<MatchResult>();
+         int hw = haystack.Width;
+@@ -117,6 +120,7 @@ public static class ScreenMatcher
+             int step = 2;
+             for (int y = searchRect.Top; y <= maxY; y += step)
+             {
++                ct.ThrowIfCancellationRequested();
+                 for (int x = searchRect.Left; x <= maxX; x += step)
+                 {
+                     double coarseScore = ComputeCoarseScore(hayPtr, hayStride, x, y, coarseSamples);
+@@ -229,7 +233,8 @@ public static class ScreenMatcher
+     public static unsafe List<MatchResult> FindBlueBarBlobs(
+         Bitmap haystack,
+         Point haystackOrigin,
+-        NormalizedRect? roi = null)
++        NormalizedRect? roi = null,
++        CancellationToken ct = default)
+     {
+         int hw = haystack.Width;
+         int hh = haystack.Height;
+@@ -251,6 +256,7 @@ public static class ScreenMatcher
+ 
+             for (int y = 0; y < rh; y++)
+             {
++                ct.ThrowIfCancellationRequested();
+                 byte* row = ptr + (searchRect.Top + y) * stride + searchRect.Left * 3;
+                 int rowOffset = y * rw;
+                 for (int x = 0; x < rw; x++)
+diff --git a/Engine/WorkflowRunner.cs b/Engine/WorkflowRunner.cs
+index 7b3a7ca..d07091f 100644
+--- a/Engine/WorkflowRunner.cs
++++ b/Engine/WorkflowRunner.cs
+@@ -67,25 +67,12 @@ public sealed class WorkflowRunner
+                     var m3 = await WaitAndFindAsync(config, templates, TargetKey.Step3BattleButton, ct);
+                     await ClickUntilGoneAsync(config, templates, TargetKey.Step3BattleButton, m3, 1, "BATTLE", ct);
+                     _log($"[Bước 3] Đã nhấn BATTLE ({m3.Score:P0})");
+-                    await RandomStepDelayAsync(config, "Sau Bước 3", ct);
+ 
+-                    // Bước 3.5: Kiểm tra mini-game "Kim cương ở đâu?"
+-                    if (config.MiniGameEnabled)
+-                    {
+-                        bool handled = await TryHandleMiniGameAsync(config, templates, loopNum, ct);
+-                        if (handled)
+-                            await RandomStepDelayAsync(config, "Sau mini-game", ct);
+-                    }
+-
+-                    // Bước 4: Tìm và nhấn toàn bộ thanh màu xanh lam (~50ms + random)
+-                    UpdateStep($"Vòng #{loopNum} - Bước 4: Đang tìm các thanh màu xanh lam");
+-                    if (config.BlueBarAppearDelayMs > 0)
+-                    {
+-                        int appearWait = config.BlueBarAppearDelayMs + Random.Shared.Next(0, 180);
+-                        await Task.Delay(appearWait, ct);
+-                    }
+-
+-                    var blueBars = await WaitAndFindAllBlueBarsAsync(config, templates, ct);
++                    // Bước 3.5 + 4: dò SONG SONG mini-game "Kim cương ở đâu?" và thanh màu xanh lam.
++                    // Ngay sau BATTLE, mỗi lần quét cùng lúc tìm nút START và các thanh xanh, cái nào
++                    // xuất hiện trước thì xử lý trước (không chờ cố định, không chờ tuần tự).
++                    UpdateStep($"Vòng #{loopNum} - Bước 4: Dò mini-game & thanh màu xanh lam");
++                    var blueBars = await WaitForBlueBarsOrMiniGameAsync(config, templates, loopNum, ct);
+                     var orderedBars = OrderBlueBars(blueBars, config.BlueBarOrder);
+                     _log($"[Bước 4] Tìm thấy {orderedBars.Count} thanh màu xanh lam. Bắt đầu nhấn mỗi thanh 1 lần...");
+ 
+@@ -209,7 +196,7 @@ public sealed class WorkflowRunner
+             ct.ThrowIfCancellationRequested();
+             Rectangle bounds = ScreenMatcher.ResolveCaptureBounds(config);
+             using var screen = ScreenMatcher.CaptureScreen(bounds);
+-            var match = ScreenMatcher.FindBestMatch(screen, bounds.Location, tpl, cfg);
++            var match = ScreenMatcher.FindBestMatch(screen, bounds.Location, tpl, cfg, ct);
+             if (match != null)
+                 return match;
+ 
+@@ -219,13 +206,37 @@ public sealed class WorkflowRunner
+         throw new TimeoutException($"Không tìm thấy '{cfg.DisplayName}' trên màn hình sau {config.WaitForMatchTimeoutMs / 1000.0:F1}s.");
+     }
+ 
+-    private async Task<List<MatchResult>> WaitAndFindAllBlueBarsAsync(
++    private static List<MatchResult> FindBlueBars(
+         AppConfig config,
+         Dictionary<TargetKey, Bitmap> templates,
++        TargetConfig cfg,
++        Bitmap screen,
++        Rectangle bounds,
+         CancellationToken ct)
+     {
+-        var cfg = config.GetTarget(TargetKey.Step4BlueBar);
+-        var deadline = DateTime.UtcNow.AddMilliseconds(Math.Max(2000, config.WaitForMatchTimeoutMs));
++        return config.BlueBarMode == BlueBarDetectMode.BlueColorBlob
++            ? ScreenMatcher.FindBlueBarBlobs(screen, bounds.Location, cfg.SearchRoi, ct)
++            : ScreenMatcher.FindAllMatches(screen, bounds.Location, templates[TargetKey.Step4BlueBar], cfg, maxMatches: 64, ct: ct);
++    }
++
++    /// <summary>
++    /// Scans the screen in ONE loop for both the mini-game START button and the blue bars.
++    /// Whichever shows up first is handled first: if START appears the mini-game is played and the
++    /// scan continues; as soon as blue bars are visible they are returned (no fixed waiting).
++    /// </summary>
++    private async Task<List<MatchResult>> WaitForBlueBarsOrMiniGameAsync(
++        AppConfig config,
++        Dictionary<TargetKey, Bitmap> templates,
++        int loopNum,
++        CancellationToken ct)
++    {
++        var barCfg = config.GetTarget(TargetKey.Step4BlueBar);
++        bool watchMiniGame = config.MiniGameEnabled && templates.ContainsKey(TargetKey.MiniGameStartButton);
++        TargetConfig? startCfg = watchMiniGame ? config.GetTarget(TargetKey.MiniGameStartButton) : null;
++        Bitmap? startTpl = watchMiniGame ? templates[TargetKey.MiniGameStartButton] : null;
++
++        int timeoutMs = Math.Max(2000, config.WaitForMatchTimeoutMs);
++        var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+ 
+         while (DateTime.UtcNow < deadline)
+         {
+@@ -233,24 +244,37 @@ public sealed class WorkflowRunner
+             Rectangle bounds = ScreenMatcher.ResolveCaptureBounds(config);
+             using var screen = ScreenMatcher.CaptureScreen(bounds);
+ 
+-            List<MatchResult> matches = config.BlueBarMode == BlueBarDetectMode.BlueColorBlob
+-                ? ScreenMatcher.FindBlueBarBlobs(screen, bounds.Location, cfg.SearchRoi)
+-                : ScreenMatcher.FindAllMatches(screen, bounds.Location, templates[TargetKey.Step4BlueBar], cfg, maxMatches: 64);
++            // Check START first: while the mini-game panel is open, its diamond looks like a blue bar
++            if (watchMiniGame)
++            {
++                var start = ScreenMatcher.FindBestMatch(screen, bounds.Location, startTpl!, startCfg!, ct);
++                if (start != null)
++                {
++                    await HandleMiniGameAsync(config, templates, start, loopNum, ct);
++                    UpdateStep($"Vòng #{loopNum} - Bước 4: Dò thanh màu xanh lam");
++                    deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
++                    continue;
++                }
++            }
+ 
++            var matches = FindBlueBars(config, templates, barCfg, screen, bounds, ct);
+             if (matches.Count > 0)
+             {
+                 // Small stabilization wait so all bars finish rendering if first frame just appeared
+                 await Task.Delay(120, ct);
+                 Rectangle bounds2 = ScreenMatcher.ResolveCaptureBounds(config);
+                 using var screen2 = ScreenMatcher.CaptureScreen(bounds2);
+-                var stableMatches = config.BlueBarMode == BlueBarDetectMode.BlueColorBlob
+-                    ? ScreenMatcher.FindBlueBarBlobs(screen2, bounds2.Location, cfg.SearchRoi)
+-                    : ScreenMatcher.FindAllMatches(screen2, bounds2.Location, templates[TargetKey.Step4BlueBar], cfg, maxMatches: 64);
+ 
+-                return stableMatches.Count >= matches.Count ? stableMatches : matches;
++                // The mini-game may have appeared in the meantime: handle it on the next iteration
++                if (watchMiniGame &&
++                    ScreenMatcher.FindBestMatch(screen2, bounds2.Location, startTpl!, startCfg!, ct) != null)
++                    continue;
++
++                var stable = FindBlueBars(config, templates, barCfg, screen2, bounds2, ct);
++                return stable.Count >= matches.Count ? stable : matches;
+             }
+ 
+-            await Task.Delay(120, ct);
++            await Task.Delay(60, ct);
+         }
+ 
+         throw new TimeoutException($"Không tìm thấy thanh màu xanh lam nào sau {config.WaitForMatchTimeoutMs / 1000.0:F1}s.");
+@@ -273,38 +297,18 @@ public sealed class WorkflowRunner
+     private const int MiniGameSlotHalfHeight = 40;
+ 
+     /// <summary>
+-    /// Checks if the "Kim cương ở đâu?" mini-game appeared after BATTLE.
+-    /// If found: clicks START, waits for the shuffle, then watches each of the 8 stumps separately
+-    /// and clicks the one that keeps spinning. Returns true if the mini-game was detected.
++    /// Plays the "Kim cương ở đâu?" mini-game once its START button has been detected:
++    /// clicks START, then watches each of the 8 stumps separately and clicks the one that keeps spinning.
+     /// </summary>
+-    private async Task<bool> TryHandleMiniGameAsync(
++    private async Task HandleMiniGameAsync(
+         AppConfig config,
+         Dictionary<TargetKey, Bitmap> templates,
++        MatchResult startMatch,
+         int loopNum,
+         CancellationToken ct)
+     {
+-        if (!templates.ContainsKey(TargetKey.MiniGameStartButton))
+-            return false;
+-
+         var startCfg = config.GetTarget(TargetKey.MiniGameStartButton);
+         var startTpl = templates[TargetKey.MiniGameStartButton];
+-        var deadline = DateTime.UtcNow.AddMilliseconds(Math.Max(500, config.MiniGameCheckTimeoutMs));
+-
+-        // Quick check: is the START button visible?
+-        MatchResult? startMatch = null;
+-        while (DateTime.UtcNow < deadline)
+-        {
+-            ct.ThrowIfCancellationRequested();
+-            Rectangle bounds = ScreenMatcher.ResolveCaptureBounds(config);
+-            using var screen = ScreenMatcher.CaptureScreen(bounds);
+-            startMatch = ScreenMatcher.FindBestMatch(screen, bounds.Location, startTpl, startCfg);
+-            if (startMatch != null)
+-                break;
+-            await Task.Delay(100, ct);
+-        }
+-
+-        if (startMatch == null)
+-            return false; // No mini-game appeared, continue normally
+ 
+         _log($"[Mini-game] Phát hiện mini-game \"Kim cương ở đâu?\" (START: {startMatch.Score:P0})");
+         UpdateStep($"Vòng #{loopNum} - Mini-game: Nhấn START");
+@@ -337,7 +341,7 @@ public sealed class WorkflowRunner
+         if (!captureBounds.Contains(ring))
+         {
+             _log("[Mini-game] Vùng 8 hộp nằm ngoài cửa sổ game (kiểm tra MiniGameLayoutScale). Bỏ qua mini-game.");
+-            return true;
++            return;
+         }
+ 
+         _log("[Mini-game] Đã nhấn START. Chờ xáo trộn...");
+@@ -437,7 +441,7 @@ public sealed class WorkflowRunner
+         if (chosen < 0)
+         {
+             _log("[Mini-game] Không tìm thấy hộp nào quay liên tục. Bỏ qua mini-game.");
+-            return true;
++            return;
+         }
+ 
+         _log($"[Mini-game] Đã nhấn hộp quay #{chosen + 1}.");
+@@ -452,7 +456,7 @@ public sealed class WorkflowRunner
+             ct.ThrowIfCancellationRequested();
+             Rectangle bounds = ScreenMatcher.ResolveCaptureBounds(config);
+             using var screen = ScreenMatcher.CaptureScreen(bounds);
+-            stillOpen = ScreenMatcher.FindBestMatch(screen, bounds.Location, startTpl, startCfg) != null;
++            stillOpen = ScreenMatcher.FindBestMatch(screen, bounds.Location, startTpl, startCfg, ct) != null;
+             if (!stillOpen)
+                 break;
+             await Task.Delay(200, ct);
+@@ -462,7 +466,7 @@ public sealed class WorkflowRunner
+             ? "[Mini-game] Cảnh báo: nút START vẫn còn trên màn hình, mini-game có thể chưa đóng."
+             : "[Mini-game] Mini-game đã đóng. Hoàn tất.");
+ 
+-        return true;
++        return;
+     }
+ 
+     /// <summary>
+@@ -526,11 +530,11 @@ public sealed class WorkflowRunner
+         return hits >= 2;
+     }
+ 
+-    private static MatchResult? FindNow(AppConfig config, Bitmap tpl, TargetConfig cfg)
++    private static MatchResult? FindNow(AppConfig config, Bitmap tpl, TargetConfig cfg, CancellationToken ct)
+     {
+         Rectangle bounds = ScreenMatcher.ResolveCaptureBounds(config);
+         using var screen = ScreenMatcher.CaptureScreen(bounds);
+-        return ScreenMatcher.FindBestMatch(screen, bounds.Location, tpl, cfg);
++        return ScreenMatcher.FindBestMatch(screen, bounds.Location, tpl, cfg, ct);
+     }
+ 
+     /// <summary>
+@@ -560,7 +564,7 @@ public sealed class WorkflowRunner
+                 Win32.BringWindowToFrontByTitle(config.TargetWindowTitle);
+ 
+             // The button may have moved or been re-drawn since it was last seen
+-            var fresh = FindNow(config, tpl, cfg);
++            var fresh = FindNow(config, tpl, cfg, ct);
+             if (fresh != null)
+                 target = fresh;
+ 
+@@ -579,7 +583,7 @@ public sealed class WorkflowRunner
+             while (DateTime.UtcNow < verifyDeadline)
+             {
+                 await Task.Delay(90, ct);
+-                if (FindNow(config, tpl, cfg) == null)
++                if (FindNow(config, tpl, cfg, ct) == null)
+                     return target;
+             }
+ 
+@@ -614,8 +618,8 @@ public sealed class WorkflowRunner
+             Rectangle bounds = ScreenMatcher.ResolveCaptureBounds(config);
+             using var screen = ScreenMatcher.CaptureScreen(bounds);
+ 
+-            var whiteCd = ScreenMatcher.FindBestMatch(screen, bounds.Location, templates[TargetKey.Step6CooldownWhite], whiteCfg);
+-            var redCd = ScreenMatcher.FindBestMatch(screen, bounds.Location, templates[TargetKey.Step6CooldownRed], redCfg);
++            var whiteCd = ScreenMatcher.FindBestMatch(screen, bounds.Location, templates[TargetKey.Step6CooldownWhite], whiteCfg, ct);
++            var redCd = ScreenMatcher.FindBestMatch(screen, bounds.Location, templates[TargetKey.Step6CooldownRed], redCfg, ct);
+ 
+ 
+             if (whiteCd != null && redCd != null)
+diff --git a/Forms/MainForm.cs b/Forms/MainForm.cs
+index 462b05a..a1f931e 100644
+--- a/Forms/MainForm.cs
++++ b/Forms/MainForm.cs
+@@ -1090,6 +1090,9 @@ public sealed class MainForm : Form
+             }
+             finally
+             {
++                // Make sure no synthetic mouse button stays pressed after a stop
++                try { Win32.LeftUp(); } catch { }
++
+                 SafeUi(() =>
+                 {
+                     _btnStartStop.Text = "▶ BẮT ĐẦU (F6)";
+@@ -1106,9 +1109,24 @@ public sealed class MainForm : Form
+         {
+             _cts.Cancel();
+             AppendLog("Đang dừng quy trình...");
++
++            if (!IsDisposed)
++            {
++                _btnStartStop.Text = "⏳ Đang dừng...";
++                _btnStartStop.BackColor = Color.FromArgb(217, 119, 6);
++                _ = WarnIfStopIsSlowAsync();
++            }
+         }
+     }
+ 
++    private async Task WarnIfStopIsSlowAsync()
++    {
++        var task = _runTask;
++        await Task.Delay(3000);
++        if (!IsDisposed && task != null && !task.IsCompleted)
++            AppendLog("[Cảnh báo] Quy trình vẫn chưa dừng sau 3s. Vui lòng chờ thêm hoặc đóng ứng dụng.");
++    }
++
+     private void SafeUi(Action action)
+     {
+         if (IsDisposed) return;
+@@ -1121,6 +1139,15 @@ public sealed class MainForm : Form
+     private void AppendLog(string message)
+     {
+         string line = $"[{DateTime.Now:HH:mm:ss}] {message}{Environment.NewLine}";
++
++        // Keep the log small: a huge TextBox makes the UI (and the stop button) sluggish
++        if (_txtLog.TextLength > 30000)
++        {
++            string text = _txtLog.Text;
++            int cut = text.IndexOf('\n', text.Length - 15000);
++            _txtLog.Text = cut >= 0 ? text.Substring(cut + 1) : string.Empty;
++        }
++
+         _txtLog.AppendText(line);
+     }
+ 
+diff --git a/Models/AppConfig.cs b/Models/AppConfig.cs
+index 6de39f8..0c83185 100644
+--- a/Models/AppConfig.cs
++++ b/Models/AppConfig.cs
+@@ -98,6 +98,7 @@ public sealed class AppConfig
+     public BlueBarDetectMode BlueBarMode { get; set; } = BlueBarDetectMode.TemplateMatching;
+     public BlueBarClickOrder BlueBarOrder { get; set; } = BlueBarClickOrder.NaturalRandomized;
+     public int WaitForMatchTimeoutMs { get; set; } = 12000;
++    // No longer used: blue bars and the mini-game START button are now scanned in parallel right after BATTLE
+     public int BlueBarAppearDelayMs { get; set; } = 450;
+ 
+     // Reliability settings
+@@ -115,7 +116,6 @@ public sealed class AppConfig
+ 
+     // Mini-game "Kim cương ở đâu?" settings
+     public bool MiniGameEnabled { get; set; } = true;
+-    public int MiniGameCheckTimeoutMs { get; set; } = 1800;
+ 
+     // Short wait after pressing START before tracking begins (+ up to 500ms random).
+     // The correct stump spins from the start, so there is no need to wait for the shuffle to end.
