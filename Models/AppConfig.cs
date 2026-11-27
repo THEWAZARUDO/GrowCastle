@@ -86,6 +86,11 @@ public sealed class AppConfig
     public double WaitBeforeRepeatMinSeconds { get; set; } = 0.08;
     public double WaitBeforeRepeatMaxSeconds { get; set; } = 0.14;
 
+    // Take a short break after a random number of completed loops
+    public int LongPauseEveryMinLoops { get; set; } = 10;
+    public int LongPauseEveryMaxLoops { get; set; } = 20;
+    public double LongPauseDurationSeconds { get; set; } = 2.0;
+
     // Human mouse movement settings
     public int NormalMoveDurationMinMs { get; set; } = 170;
     public int NormalMoveDurationMaxMs { get; set; } = 390;
@@ -98,11 +103,24 @@ public sealed class AppConfig
     public BlueBarDetectMode BlueBarMode { get; set; } = BlueBarDetectMode.TemplateMatching;
     public BlueBarClickOrder BlueBarOrder { get; set; } = BlueBarClickOrder.NaturalRandomized;
     public int WaitForMatchTimeoutMs { get; set; } = 12000;
+    // No longer used: blue bars and the mini-game START button are now scanned in parallel right after BATTLE
     public int BlueBarAppearDelayMs { get; set; } = 450;
+
+    // Reliability settings
+    // Bring the game window to the foreground at the start of every loop
+    public bool AutoFocusGameWindow { get; set; } = true;
+
+    // After clicking BATTLE / NHẬN / PHÂN RÃ, check the button disappeared; if not, click again
+    public bool VerifyClicks { get; set; } = true;
+    public int ClickRetryMax { get; set; } = 3;
+    public int ClickVerifyTimeoutMs { get; set; } = 700;
+
+    // A timeout in one loop no longer stops the program; it restarts from step 1.
+    // Stop only after this many failed loops in a row.
+    public int MaxConsecutiveFailures { get; set; } = 5;
 
     // Mini-game "Kim cương ở đâu?" settings
     public bool MiniGameEnabled { get; set; } = true;
-    public int MiniGameCheckTimeoutMs { get; set; } = 1800;
 
     // Short wait after pressing START before tracking begins (+ up to 500ms random).
     // The correct stump spins from the start, so there is no need to wait for the shuffle to end.

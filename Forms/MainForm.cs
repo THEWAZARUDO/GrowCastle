@@ -40,6 +40,9 @@ public sealed class MainForm : Form
     private NumericUpDown _numTrackDuration = null!;
     private NumericUpDown _numWaitRepeatMin = null!;
     private NumericUpDown _numWaitRepeatMax = null!;
+    private NumericUpDown _numLongPauseLoopsMin = null!;
+    private NumericUpDown _numLongPauseLoopsMax = null!;
+    private NumericUpDown _numLongPauseDuration = null!;
     private NumericUpDown _numMoveNormalMin = null!;
     private NumericUpDown _numMoveNormalMax = null!;
     private NumericUpDown _numMoveFastMin = null!;
@@ -503,6 +506,30 @@ public sealed class MainForm : Form
         y += 30;
 
         (_numWaitRepeatMin, _numWaitRepeatMax) = AddRangeRow(p, ref y, "Chờ lặp lại từ bước 1 (~0.1s):", 0.01m, 60m, 2, 0.05m);
+        (_numLongPauseLoopsMin, _numLongPauseLoopsMax) = AddRangeRow(p, ref y, "Nghỉ định kỳ sau mỗi (vòng):", 1, 200, 0, 1);
+
+        var lblLongPauseDuration = new Label
+        {
+            Text = "Thời gian nghỉ định kỳ (s):",
+            Location = new Point(8, y + 4),
+            Size = new Size(238, 22),
+            ForeColor = Color.FromArgb(203, 213, 225)
+        };
+        _numLongPauseDuration = new NumericUpDown
+        {
+            Location = new Point(250, y),
+            Width = 74,
+            Minimum = 0.1m,
+            Maximum = 60m,
+            DecimalPlaces = 1,
+            Increment = 0.5m,
+            BackColor = Color.FromArgb(35, 43, 59),
+            ForeColor = Color.White
+        };
+        _numLongPauseDuration.ValueChanged += (_, _) => SaveUiSettings();
+        p.Controls.AddRange([lblLongPauseDuration, _numLongPauseDuration]);
+        y += 30;
+
         (_numMoveNormalMin, _numMoveNormalMax) = AddRangeRow(p, ref y, "Di chuột thường (ms):", 40, 1500, 0, 10);
         (_numMoveFastMin, _numMoveFastMax) = AddRangeRow(p, ref y, "Di chuột nhanh thanh xanh (ms):", 10, 300, 0, 5);
         (_numCurveMin, _numCurveMax) = AddRangeRow(p, ref y, "Độ cong quỹ đạo Bézier:", 0.02m, 0.55m, 2, 0.02m);
@@ -607,6 +634,9 @@ public sealed class MainForm : Form
             _numTrackDuration.Value = ClampDec((decimal)_config.LootTrackDurationSeconds, _numTrackDuration);
             _numWaitRepeatMin.Value = ClampDec((decimal)_config.WaitBeforeRepeatMinSeconds, _numWaitRepeatMin);
             _numWaitRepeatMax.Value = ClampDec((decimal)_config.WaitBeforeRepeatMaxSeconds, _numWaitRepeatMax);
+            _numLongPauseLoopsMin.Value = ClampDec(_config.LongPauseEveryMinLoops, _numLongPauseLoopsMin);
+            _numLongPauseLoopsMax.Value = ClampDec(_config.LongPauseEveryMaxLoops, _numLongPauseLoopsMax);
+            _numLongPauseDuration.Value = ClampDec((decimal)_config.LongPauseDurationSeconds, _numLongPauseDuration);
             _numMoveNormalMin.Value = ClampDec(_config.NormalMoveDurationMinMs, _numMoveNormalMin);
             _numMoveNormalMax.Value = ClampDec(_config.NormalMoveDurationMaxMs, _numMoveNormalMax);
             _numMoveFastMin.Value = ClampDec(_config.FastMoveDurationMinMs, _numMoveFastMin);
@@ -646,6 +676,9 @@ public sealed class MainForm : Form
         _config.LootTrackDurationSeconds = (double)_numTrackDuration.Value;
         _config.WaitBeforeRepeatMinSeconds = (double)_numWaitRepeatMin.Value;
         _config.WaitBeforeRepeatMaxSeconds = Math.Max(_config.WaitBeforeRepeatMinSeconds, (double)_numWaitRepeatMax.Value);
+        _config.LongPauseEveryMinLoops = (int)_numLongPauseLoopsMin.Value;
+        _config.LongPauseEveryMaxLoops = Math.Max(_config.LongPauseEveryMinLoops, (int)_numLongPauseLoopsMax.Value);
+        _config.LongPauseDurationSeconds = (double)_numLongPauseDuration.Value;
         _config.NormalMoveDurationMinMs = (int)_numMoveNormalMin.Value;
         _config.NormalMoveDurationMaxMs = Math.Max(_config.NormalMoveDurationMinMs, (int)_numMoveNormalMax.Value);
         _config.FastMoveDurationMinMs = (int)_numMoveFastMin.Value;
@@ -670,6 +703,9 @@ public sealed class MainForm : Form
         _config.LootTrackDurationSeconds = def.LootTrackDurationSeconds;
         _config.WaitBeforeRepeatMinSeconds = def.WaitBeforeRepeatMinSeconds;
         _config.WaitBeforeRepeatMaxSeconds = def.WaitBeforeRepeatMaxSeconds;
+        _config.LongPauseEveryMinLoops = def.LongPauseEveryMinLoops;
+        _config.LongPauseEveryMaxLoops = def.LongPauseEveryMaxLoops;
+        _config.LongPauseDurationSeconds = def.LongPauseDurationSeconds;
         _config.NormalMoveDurationMinMs = def.NormalMoveDurationMinMs;
         _config.NormalMoveDurationMaxMs = def.NormalMoveDurationMaxMs;
         _config.FastMoveDurationMinMs = def.FastMoveDurationMinMs;
@@ -1090,6 +1126,9 @@ public sealed class MainForm : Form
             }
             finally
             {
+                // Make sure no synthetic mouse button stays pressed after a stop
+                try { Win32.LeftUp(); } catch { }
+
                 SafeUi(() =>
                 {
                     _btnStartStop.Text = "▶ BẮT ĐẦU (F6)";
@@ -1106,7 +1145,22 @@ public sealed class MainForm : Form
         {
             _cts.Cancel();
             AppendLog("Đang dừng quy trình...");
+
+            if (!IsDisposed)
+            {
+                _btnStartStop.Text = "⏳ Đang dừng...";
+                _btnStartStop.BackColor = Color.FromArgb(217, 119, 6);
+                _ = WarnIfStopIsSlowAsync();
+            }
         }
+    }
+
+    private async Task WarnIfStopIsSlowAsync()
+    {
+        var task = _runTask;
+        await Task.Delay(3000);
+        if (!IsDisposed && task != null && !task.IsCompleted)
+            AppendLog("[Cảnh báo] Quy trình vẫn chưa dừng sau 3s. Vui lòng chờ thêm hoặc đóng ứng dụng.");
     }
 
     private void SafeUi(Action action)
@@ -1121,6 +1175,15 @@ public sealed class MainForm : Form
     private void AppendLog(string message)
     {
         string line = $"[{DateTime.Now:HH:mm:ss}] {message}{Environment.NewLine}";
+
+        // Keep the log small: a huge TextBox makes the UI (and the stop button) sluggish
+        if (_txtLog.TextLength > 30000)
+        {
+            string text = _txtLog.Text;
+            int cut = text.IndexOf('\n', text.Length - 15000);
+            _txtLog.Text = cut >= 0 ? text.Substring(cut + 1) : string.Empty;
+        }
+
         _txtLog.AppendText(line);
     }
 

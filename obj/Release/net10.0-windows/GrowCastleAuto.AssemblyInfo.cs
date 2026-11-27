@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("GrowCastleAuto")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Release")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+fa1338485be862db44f21b54694c286d37081074")]
 [assembly: System.Reflection.AssemblyProductAttribute("GrowCastleAuto")]
 [assembly: System.Reflection.AssemblyTitleAttribute("GrowCastleAuto")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
