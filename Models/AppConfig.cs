@@ -119,29 +119,41 @@ public sealed class AppConfig
     // Stop only after this many failed loops in a row.
     public int MaxConsecutiveFailures { get; set; } = 5;
 
-    // Mini-game "Kim cương ở đâu?" settings
+    // Mini-game "Kim cương ở đâu?" settings.
+    // It is a shell game: the diamond drops into one stump, the 8 stumps tumble together and spread back
+    // into the ring. Stumps look identical, so after the shuffle the program picks a stump from
+    // MiniGameSlotMap (see below) or at random when the rule is unknown.
     public bool MiniGameEnabled { get; set; } = true;
 
-    // Short wait after pressing START before tracking begins (+ up to 500ms random).
-    // The correct stump spins from the start, so there is no need to wait for the shuffle to end.
-    public int MiniGameShuffleWaitMs { get; set; } = 600;
-
-    // Keep tracking the 8 stumps (retrying) for at most this long after the initial wait
+    // Maximum time to wait for the shuffle to finish (stumps back in the ring and still)
     public int MiniGameTrackTimeoutMs { get; set; } = 12000;
-    public int MiniGameSampleIntervalMs { get; set; } = 70;
+    public int MiniGameSampleIntervalMs { get; set; } = 40;
 
     // A pixel counts as "changed" when the summed RGB difference reaches this value
     public int MiniGamePixelThreshold { get; set; } = 28;
 
-    // A stump is "moving" in a frame pair when at least this fraction of its pixels changed
-    public double MiniGameActiveRatio { get; set; } = 0.05;
+    // A stump slot is "moving" in a frame pair when at least this fraction of its pixels changed
+    public double MiniGameActiveRatio { get; set; } = 0.03;
 
-    // A stump is a candidate once it was the ONLY moving one in at least this many of the last
-    // (this + 2) frame pairs. Because the spinner swaps slots every few seconds, only recent frames count.
-    public int MiniGameStableFrames { get; set; } = 4;
+    // Number of consecutive still frame pairs (all 8 stumps in place) that mean the shuffle is over
+    public int MiniGameStableFrames { get; set; } = 6;
 
-    // Scale of the mini-game panel relative to the reference layout (788x594). 1.0 = same size.
+    // Fallback scale of the mini-game panel (788x594 = 1.0) when the diamond cannot be found
     public double MiniGameLayoutScale { get; set; } = 1.0;
+
+    // Which stump to click, per stump the diamond dropped into. Index = stump the diamond dropped into,
+    // value = stump to click, both 0..7 clockwise from the top stump (0 = top, 1 = top-right, 2 = right,
+    // 3 = bottom-right, 4 = bottom, 5 = bottom-left, 6 = left, 7 = top-left). -1 = unknown (random click).
+    // Follow the cup that spins independently (it holds the diamond) through the shuffle and click the slot
+    // where it ends up. Needs OpenCV and the cup template; when unavailable the click falls back to
+    // MiniGameSlotMap / random.
+    public bool MiniGameUseSpinTracker { get; set; } = true;
+    public string MiniGameCupTemplate { get; set; } = "cup_template.png";
+
+    // Debug: save every captured mini-game frame to the "debug" folder next to the exe (for offline analysis)
+    public bool MiniGameSaveFrames { get; set; } = false;
+
+    public int[] MiniGameSlotMap { get; set; } = [-1, -1, -1, -1, -1, -1, -1, -1];
 
     public List<TargetConfig> Targets { get; set; } = CreateDefaultTargets();
 

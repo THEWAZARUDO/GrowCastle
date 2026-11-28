@@ -10,11 +10,11 @@
         "projectUniqueName": "D:\\Codes\\GrowCastle\\GrowCastle\\GrowCastleAuto.csproj",
         "projectName": "GrowCastleAuto",
         "projectPath": "D:\\Codes\\GrowCastle\\GrowCastle\\GrowCastleAuto.csproj",
-        "packagesPath": "C:\\Users\\HOME\\AppData\\Local\\Temp\\dotnet_home\\.nuget\\packages\\",
+        "packagesPath": "C:\\Users\\HOME\\.nuget\\packages\\",
         "outputPath": "D:\\Codes\\GrowCastle\\GrowCastle\\obj\\",
         "projectStyle": "PackageReference",
         "configFilePaths": [
-          "C:\\Users\\HOME\\AppData\\Local\\Temp\\appdata\\NuGet\\NuGet.Config",
+          "C:\\Users\\HOME\\AppData\\Roaming\\NuGet\\NuGet.Config",
           "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.Offline.config"
         ],
         "originalTargetFrameworks": [
@@ -47,6 +47,20 @@
         "net10.0-windows": {
           "framework": "net10.0-windows7.0",
           "targetAlias": "net10.0-windows",
+          "dependencies": {
+            "OpenCvSharp4": {
+              "target": "Package",
+              "version": "[4.10.0.*, )"
+            },
+            "OpenCvSharp4.Extensions": {
+              "target": "Package",
+              "version": "[4.10.0.*, )"
+            },
+            "OpenCvSharp4.runtime.win": {
+              "target": "Package",
+              "version": "[4.10.0.*, )"
+            }
+          },
           "imports": [
             "net461",
             "net462",

@@ -241,21 +241,27 @@ public sealed class MainForm : Form
         };
         body.Controls.Add(leftContainer, 0, 0);
 
-        var leftHeader = new Panel { Dock = DockStyle.Top, Height = 40 };
+        var leftHeader = new Panel { Dock = DockStyle.Top, Height = 78 };
         var lblTemplatesTitle = new Label
         {
             Text = "Ảnh mẫu nhận diện (Chụp trực tiếp từ cửa sổ game)",
-            Dock = DockStyle.Left,
-            Width = 420,
+            Location = new Point(0, 0),
+            Size = new Size(420, 40),
             Font = new Font("Segoe UI", 10.5f, FontStyle.Bold),
             ForeColor = Color.FromArgb(248, 250, 252),
             TextAlign = ContentAlignment.MiddleLeft
         };
         var btnTestAllBlue = MakeButton("🔍 Test tìm tất cả thanh xanh lam", new Point(425, 5), new Size(220, 30), Color.FromArgb(14, 116, 144));
         btnTestAllBlue.Anchor = AnchorStyles.Top | AnchorStyles.Right;
-        btnTestAllBlue.Click += (_, _) => TestBlueBarsPreview();
+        btnTestAllBlue.Click += async (_, _) => await TestBlueBarsPreviewAsync();
+        var btnCheckMini = MakeButton("🧪 Kiểm tra mini-game (không nhấn)", new Point(5, 42), new Size(250, 30), Color.FromArgb(124, 58, 237));
+        btnCheckMini.Click += async (_, _) => await TestMiniGameCheckAsync();
+        var btnPlayMini = MakeButton("🎮 Chơi thử mini-game 1 lần (nhấn thật)", new Point(262, 42), new Size(270, 30), Color.FromArgb(190, 24, 93));
+        btnPlayMini.Click += (_, _) => TestMiniGamePlay();
         leftHeader.Controls.Add(lblTemplatesTitle);
         leftHeader.Controls.Add(btnTestAllBlue);
+        leftHeader.Controls.Add(btnCheckMini);
+        leftHeader.Controls.Add(btnPlayMini);
 
         _templatesPanel = new FlowLayoutPanel
         {
@@ -416,7 +422,7 @@ public sealed class MainForm : Form
         btnCapture.Click += async (_, _) => await CaptureTemplateAsync(target);
 
         var btnTest = MakeButton("Test", new Point(504, 40), new Size(52, 30), Color.FromArgb(13, 148, 136));
-        btnTest.Click += (_, _) => TestSingleTemplate(target);
+        btnTest.Click += async (_, _) => await TestSingleTemplateAsync(target);
 
         var btnRoi = MakeButton("Vùng", new Point(560, 40), new Size(46, 30), Color.FromArgb(71, 85, 105));
         btnRoi.Click += async (_, _) => await PickTargetRoiAsync(target);
@@ -991,7 +997,24 @@ public sealed class MainForm : Form
         }
     }
 
-    private void TestSingleTemplate(TargetConfig target)
+    /// <summary>
+    /// Captures the game area for a Test button. This tool's own window is usually in front of (or
+    /// overlapping) the game, and a screen capture would then contain this tool instead of the game,
+    /// so the game is brought to the front first.
+    /// </summary>
+    private async Task<(Bitmap Screen, Rectangle Bounds)> CaptureGameForTestAsync()
+    {
+        if (!string.IsNullOrWhiteSpace(_config.TargetWindowTitle))
+        {
+            Win32.BringWindowToFrontByTitle(_config.TargetWindowTitle);
+            await Task.Delay(350);
+        }
+
+        var bounds = ScreenMatcher.ResolveCaptureBounds(_config);
+        return (ScreenMatcher.CaptureScreen(bounds), bounds);
+    }
+
+    private async Task TestSingleTemplateAsync(TargetConfig target)
     {
         string path = Path.Combine(_templatesDir, target.TemplateFileName);
         if (!File.Exists(path))
@@ -1000,13 +1023,21 @@ public sealed class MainForm : Form
             return;
         }
 
-        var bounds = ScreenMatcher.ResolveCaptureBounds(_config);
-        using var screen = ScreenMatcher.CaptureScreen(bounds);
+        var (screenBmp, bounds) = await CaptureGameForTestAsync();
+        using var screen = screenBmp;
         using var tpl = new Bitmap(path);
 
         var matches = target.Key == TargetKey.Step4BlueBar
             ? ScreenMatcher.FindAllMatches(screen, bounds.Location, tpl, target)
             : (ScreenMatcher.FindBestMatch(screen, bounds.Location, tpl, target) is { } m ? [m] : new List<MatchResult>());
+
+        if (matches.Count == 0 && target.Key != TargetKey.Step4BlueBar)
+        {
+            var nearest = ScreenMatcher.FindBestMatch(screen, bounds.Location, tpl, target, thresholdOverride: 0.40);
+            AppendLog(nearest != null
+                ? $"[Test '{target.DisplayName}'] Không đạt ngưỡng: giống nhất {nearest.Score:P1} (cần ≥ {target.Threshold:P0}) tại ({nearest.ScreenBounds.X},{nearest.ScreenBounds.Y}). Thử hạ ngưỡng hoặc chụp lại mẫu."
+                : $"[Test '{target.DisplayName}'] Không có vùng nào giống quá 40%. Màn hình game lúc này có đang ở đúng bước không?");
+        }
 
         var annotated = new Bitmap(screen);
         using (var g = Graphics.FromImage(annotated))
@@ -1026,11 +1057,11 @@ public sealed class MainForm : Form
         preview.ShowDialog(this);
     }
 
-    private void TestBlueBarsPreview()
+    private async Task TestBlueBarsPreviewAsync()
     {
         var cfg = _config.GetTarget(TargetKey.Step4BlueBar);
-        var bounds = ScreenMatcher.ResolveCaptureBounds(_config);
-        using var screen = ScreenMatcher.CaptureScreen(bounds);
+        var (screenBmp, bounds) = await CaptureGameForTestAsync();
+        using var screen = screenBmp;
 
         List<MatchResult> matches;
         if (_config.BlueBarMode == BlueBarDetectMode.BlueColorBlob)
@@ -1066,6 +1097,110 @@ public sealed class MainForm : Form
         AppendLog($"[Test thanh xanh lam] Tìm thấy {matches.Count} thanh.");
         using var preview = new PreviewForm($"Test tìm thanh xanh lam: {matches.Count} thanh", annotated);
         preview.ShowDialog(this);
+    }
+
+    private WorkflowRunner CreateTestRunner() => new(
+        _templatesDir,
+        msg => SafeUi(() => AppendLog(msg)),
+        stats => SafeUi(() => _lblStatus.Text = $"Trạng thái: {stats.CurrentStep}"));
+
+    private bool IsRunning() => _runTask != null && !_runTask.IsCompleted;
+
+    /// <summary>Test 1: mini-game detection only. Nothing is clicked.</summary>
+    private async Task TestMiniGameCheckAsync()
+    {
+        if (IsRunning())
+        {
+            MessageBox.Show(this, "Hãy dừng quy trình đang chạy trước khi test.", "Đang chạy", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        AppendLog("[Test mini-game] Kiểm tra nhận diện (không nhấn gì). Mở mini-game 'Kim cương ở đâu?' (chưa bấm START)...");
+        if (!string.IsNullOrWhiteSpace(_config.TargetWindowTitle))
+        {
+            Win32.BringWindowToFrontByTitle(_config.TargetWindowTitle);
+            await Task.Delay(500);
+        }
+
+        WorkflowRunner.MiniGameTestReport report;
+        try
+        {
+            var runner = CreateTestRunner();
+            report = await Task.Run(() => runner.InspectMiniGame(_config, CancellationToken.None));
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"[Test mini-game] LỖI: {ex.Message}");
+            return;
+        }
+
+        foreach (string line in report.Lines)
+            AppendLog($"[Test mini-game] {line}");
+
+        if (report.Image != null)
+        {
+            using var preview = new PreviewForm(
+                report.Ok ? "Test mini-game: ĐẠT" : "Test mini-game: CHƯA ĐẠT", report.Image);
+            preview.ShowDialog(this);
+        }
+    }
+
+    /// <summary>Test 2: plays the mini-game once for real. Uses the normal stop button / F6 / F8.</summary>
+    private void TestMiniGamePlay()
+    {
+        if (IsRunning())
+        {
+            MessageBox.Show(this, "Hãy dừng quy trình đang chạy trước khi test.", "Đang chạy", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        var answer = MessageBox.Show(this,
+            "Sẽ đưa game lên trước, chờ tối đa 20 giây cho nút START của mini-game xuất hiện, rồi chơi MỘT lần " +
+            "(di chuột và nhấn thật).\n\nF8 hoặc nút DỪNG để dừng khẩn cấp. Tiếp tục?",
+            "Chơi thử mini-game", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+        if (answer != DialogResult.Yes)
+            return;
+
+        _cts = new CancellationTokenSource();
+        var ct = _cts.Token;
+        _btnStartStop.Text = "⏹ DỪNG (F6 / F8)";
+        _btnStartStop.BackColor = Color.FromArgb(220, 38, 38);
+
+        var runner = CreateTestRunner();
+        string title = _config.TargetWindowTitle;
+
+        _runTask = Task.Run(async () =>
+        {
+            try
+            {
+                if (!string.IsNullOrWhiteSpace(title))
+                {
+                    Win32.BringWindowToFrontByTitle(title);
+                    await Task.Delay(500, ct);
+                }
+
+                await runner.TestPlayMiniGameAsync(_config, 20, ct);
+            }
+            catch (OperationCanceledException)
+            {
+                SafeUi(() => AppendLog("[Test mini-game] Đã dừng theo yêu cầu."));
+            }
+            catch (Exception ex)
+            {
+                SafeUi(() => AppendLog($"[Test mini-game] LỖI: {ex.Message}"));
+            }
+            finally
+            {
+                try { Win32.LeftUp(); } catch { }
+
+                SafeUi(() =>
+                {
+                    _btnStartStop.Text = "▶ BẮT ĐẦU (F6)";
+                    _btnStartStop.BackColor = Color.FromArgb(22, 163, 74);
+                    _lblStatus.Text = "Trạng thái: Đã dừng";
+                });
+            }
+        });
     }
 
     private async Task TestHumanMouseAsync()

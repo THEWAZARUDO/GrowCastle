@@ -32,3 +32,11 @@ D:\Codes\GrowCastle\GrowCastle\obj\Release\net10.0-windows\refint\GrowCastleAuto
 D:\Codes\GrowCastle\GrowCastle\obj\Release\net10.0-windows\GrowCastleAuto.pdb
 D:\Codes\GrowCastle\GrowCastle\obj\Release\net10.0-windows\GrowCastleAuto.genruntimeconfig.cache
 D:\Codes\GrowCastle\GrowCastle\obj\Release\net10.0-windows\ref\GrowCastleAuto.dll
+D:\Codes\GrowCastle\GrowCastle\bin\Release\net10.0-windows\OpenCvSharp.dll
+D:\Codes\GrowCastle\GrowCastle\bin\Release\net10.0-windows\OpenCvSharp.Extensions.dll
+D:\Codes\GrowCastle\GrowCastle\bin\Release\net10.0-windows\runtimes\win-x64\native\OpenCvSharpExtern.dll
+D:\Codes\GrowCastle\GrowCastle\bin\Release\net10.0-windows\runtimes\win-x64\native\opencv_videoio_ffmpeg4100_64.dll
+D:\Codes\GrowCastle\GrowCastle\bin\Release\net10.0-windows\runtimes\win-x86\native\OpenCvSharpExtern.dll
+D:\Codes\GrowCastle\GrowCastle\bin\Release\net10.0-windows\runtimes\win-x86\native\opencv_videoio_ffmpeg4100.dll
+D:\Codes\GrowCastle\GrowCastle\obj\Release\net10.0-windows\GrowCastleAuto.csproj.AssemblyReference.cache
+D:\Codes\GrowCastle\GrowCastle\obj\Release\net10.0-windows\GrowCast.BDF5F451.Up2Date

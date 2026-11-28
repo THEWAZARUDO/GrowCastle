@@ -42,9 +42,10 @@ public static class ScreenMatcher
         Point haystackOrigin,
         Bitmap template,
         TargetConfig cfg,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        double? thresholdOverride = null)
     {
-        var matches = FindMatchesInternal(haystack, haystackOrigin, template, cfg, findAll: false, maxMatches: 1, ct);
+        var matches = FindMatchesInternal(haystack, haystackOrigin, template, cfg, findAll: false, maxMatches: 1, ct, thresholdOverride);
         return matches.Count > 0 ? matches[0] : null;
     }
 
@@ -66,7 +67,8 @@ public static class ScreenMatcher
         TargetConfig cfg,
         bool findAll,
         int maxMatches,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        double? thresholdOverride = null)
     {
         var results = new List<MatchResult>();
         int hw = haystack.Width;
@@ -110,7 +112,7 @@ public static class ScreenMatcher
             // Build coarse sample points (grid + high-contrast points)
             var coarseSamples = BuildCoarseSamples(tplPtr, tplStride, tw, th, fgMask, maxSamples: 48);
 
-            double threshold = Math.Clamp(cfg.Threshold, 0.40, 0.99);
+            double threshold = Math.Clamp(thresholdOverride ?? cfg.Threshold, 0.40, 0.99);
             // Coarse filter is slightly looser than final threshold to avoid missing off-by-1 candidates
             double coarseMin = Math.Max(0.35, threshold - 0.14);
 
@@ -507,6 +509,104 @@ public static class ScreenMatcher
         {
             f1_24.UnlockBits(d1);
             f2_24.UnlockBits(d2);
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Finds the light-blue diamond of the "Kim cương ở đâu?" mini-game inside searchAreaScreen
+    /// (screen coordinates) and returns its bounding box in screen coordinates, or null.
+    /// </summary>
+    public static unsafe Rectangle? FindDiamondBounds(Bitmap haystack, Point haystackOrigin, Rectangle searchAreaScreen)
+    {
+        var frameRect = new Rectangle(haystackOrigin.X, haystackOrigin.Y, haystack.Width, haystack.Height);
+        Rectangle area = Rectangle.Intersect(frameRect, searchAreaScreen);
+        if (area.Width <= 0 || area.Height <= 0)
+            return null;
+
+        int x0 = area.Left - haystackOrigin.X;
+        int y0 = area.Top - haystackOrigin.Y;
+        int x1 = area.Right - haystackOrigin.X;
+        int y1 = area.Bottom - haystackOrigin.Y;
+
+        using var hay24 = Ensure24bpp(haystack);
+        var data = hay24.LockBits(new Rectangle(0, 0, haystack.Width, haystack.Height), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+
+        int minX = int.MaxValue, minY = int.MaxValue, maxX = -1, maxY = -1;
+        long count = 0;
+        try
+        {
+            byte* basePtr = (byte*)data.Scan0;
+            for (int y = y0; y < y1; y++)
+            {
+                byte* row = basePtr + y * data.Stride;
+                for (int x = x0; x < x1; x++)
+                {
+                    byte* px = row + x * 3; // B, G, R
+                    int b = px[0], g = px[1], r = px[2];
+                    if (b >= 200 && g >= 150 && r <= 185 && b - r >= 50)
+                    {
+                        count++;
+                        if (x < minX) minX = x;
+                        if (x > maxX) maxX = x;
+                        if (y < minY) minY = y;
+                        if (y > maxY) maxY = y;
+                    }
+                }
+            }
+        }
+        finally
+        {
+            hay24.UnlockBits(data);
+        }
+
+        if (count < 60 || maxX < 0)
+            return null;
+
+        return new Rectangle(haystackOrigin.X + minX, haystackOrigin.Y + minY, maxX - minX + 1, maxY - minY + 1);
+    }
+
+    /// <summary>
+    /// For each ROI (relative to the frame) returns the fraction (0..1) of pixels that look like a
+    /// tan tree stump. Used to know whether a stump currently sits in its slot of the ring.
+    /// </summary>
+    public static unsafe double[] MeasureStumpOccupancy(Bitmap frame, IReadOnlyList<Rectangle> rois)
+    {
+        var result = new double[rois.Count];
+        int fw = frame.Width;
+        int fh = frame.Height;
+
+        using var f24 = Ensure24bpp(frame);
+        var data = f24.LockBits(new Rectangle(0, 0, fw, fh), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+        try
+        {
+            byte* basePtr = (byte*)data.Scan0;
+            for (int i = 0; i < rois.Count; i++)
+            {
+                Rectangle r = Rectangle.Intersect(rois[i], new Rectangle(0, 0, fw, fh));
+                if (r.Width <= 0 || r.Height <= 0)
+                    continue;
+
+                long tan = 0;
+                for (int y = r.Top; y < r.Bottom; y++)
+                {
+                    byte* row = basePtr + y * data.Stride;
+                    for (int x = r.Left; x < r.Right; x++)
+                    {
+                        byte* px = row + x * 3; // B, G, R
+                        int b = px[0], g = px[1], rr = px[2];
+                        if (rr >= 150 && g >= 110 && rr - b >= 40)
+                            tan++;
+                    }
+                }
+
+                result[i] = (double)tan / ((long)r.Width * r.Height);
+            }
+        }
+        finally
+        {
+            f24.UnlockBits(data);
         }
 
         return result;

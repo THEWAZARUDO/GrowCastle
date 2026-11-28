@@ -1,0 +1,491 @@
+diff --git a/Engine/CupSpinTracker.cs b/Engine/CupSpinTracker.cs
+index bb0100e..e506dcd 100644
+--- a/Engine/CupSpinTracker.cs
++++ b/Engine/CupSpinTracker.cs
+@@ -177,6 +177,36 @@ public sealed class CupSpinTracker : IDisposable
+         }
+     }
+ 
++    /// <summary>
++    /// Static check (no tracking): how many cups of the frame match the cup template at the best common
++    /// angle. With the 8 upright cups before START this should be 8 at angle 0.
++    /// </summary>
++    public (int Cups, int Angle, double MeanScore) Probe(Bitmap frame)
++    {
++        using var bgr = ToBgr(frame);
++        using var half = new Mat();
++        Cv2.Resize(bgr, half, new OpenCvSharp.Size(0, 0), _k, _k, InterpolationFlags.Area);
++        using var gray = new Mat();
++        Cv2.CvtColor(half, gray, ColorConversionCodes.BGR2GRAY);
++
++        int bestCount = -1;
++        int bestAngle = 0;
++        double bestScore = 0;
++        foreach (int a in _rot.Keys)
++        {
++            var peaks = Peaks(gray, a, 0.97, 8);
++            double score = peaks.Sum(p => p.Score);
++            if (peaks.Count > bestCount || (peaks.Count == bestCount && score > bestScore))
++            {
++                bestCount = peaks.Count;
++                bestAngle = a;
++                bestScore = score;
++            }
++        }
++
++        return (Math.Max(0, bestCount), bestAngle, bestCount > 0 ? bestScore / bestCount : 0);
++    }
++
+     /// <summary>Sets the screen position where the diamond cup starts (centre of its slot).</summary>
+     public void Start(double x, double y)
+     {
+diff --git a/Engine/WorkflowRunner.cs b/Engine/WorkflowRunner.cs
+index b9226e1..e7fa49a 100644
+--- a/Engine/WorkflowRunner.cs
++++ b/Engine/WorkflowRunner.cs
+@@ -173,6 +173,224 @@ public sealed class WorkflowRunner
+         }
+     }
+ 
++    private sealed record MiniGameLayout(
++        Point StartCenter,
++        Rectangle? Diamond,
++        bool FromDiamond,
++        Point RingCenter,
++        double Scale,
++        List<Rectangle> SlotRects,
++        Rectangle Ring,
++        Rectangle TrackArea,
++        bool InsideCapture);
++
++    /// <summary>
++    /// Works out where the 8 cups are. Before START is pressed the diamond sits in the middle of the ring:
++    /// it gives the ring centre and the on-screen scale. Without it the layout is derived from the START button.
++    /// Used by both the real mini-game handling and the test buttons, so a test shows exactly what the run will use.
++    /// </summary>
++    private static MiniGameLayout ComputeMiniGameLayout(AppConfig config, Rectangle captureBounds, Bitmap shot, Rectangle startBounds)
++    {
++        Point startCenter = new(startBounds.Left + startBounds.Width / 2, startBounds.Top + startBounds.Height / 2);
++
++        var diamondSearch = new Rectangle(startCenter.X - 900, startCenter.Y - 650, 900, 630);
++        Rectangle? diamond = ScreenMatcher.FindDiamondBounds(shot, captureBounds.Location, diamondSearch);
++
++        Point ringCenter;
++        double scale;
++        if (diamond is { } d0)
++        {
++            scale = Math.Clamp(d0.Width / MiniGameDiamondRefWidth, 0.4, 4.0);
++            ringCenter = new Point(d0.X + d0.Width / 2, d0.Y + d0.Height / 2);
++        }
++        else
++        {
++            scale = Math.Clamp(config.MiniGameLayoutScale, 0.3, 4.0);
++            ringCenter = new Point(
++                startCenter.X + (int)Math.Round(MiniGameRingFromStart.X * scale),
++                startCenter.Y + (int)Math.Round(MiniGameRingFromStart.Y * scale));
++        }
++
++        int halfW = Math.Max(4, (int)Math.Round(MiniGameSlotHalfWidth * scale));
++        int halfH = Math.Max(4, (int)Math.Round(MiniGameSlotHalfHeight * scale));
++        var slotRects = new List<Rectangle>(MiniGameRingOffsets.Length);
++        foreach (var off in MiniGameRingOffsets)
++        {
++            int cx = ringCenter.X + (int)Math.Round(off.X * scale);
++            int cy = ringCenter.Y + (int)Math.Round(off.Y * scale);
++            slotRects.Add(new Rectangle(cx - halfW, cy - halfH, halfW * 2, halfH * 2));
++        }
++
++        Rectangle ring = slotRects[0];
++        foreach (var r in slotRects)
++            ring = Rectangle.Union(ring, r);
++        ring.Inflate(6, 6);
++
++        bool inside = captureBounds.Contains(ring);
++
++        // Area that is captured while the cups shuffle: the ring plus the room the cups fly through
++        Rectangle trackArea = new(
++            ringCenter.X - (int)Math.Round(215 * scale),
++            ringCenter.Y - (int)Math.Round(205 * scale),
++            (int)Math.Round(430 * scale),
++            (int)Math.Round(420 * scale));
++        trackArea = Rectangle.Intersect(captureBounds, Rectangle.Union(trackArea, ring));
++
++        return new MiniGameLayout(startCenter, diamond, diamond != null, ringCenter, scale, slotRects, ring, trackArea, inside);
++    }
++
++    /// <summary>Result of <see cref="InspectMiniGame"/>: a text report and an annotated screenshot.</summary>
++    public sealed class MiniGameTestReport
++    {
++        public bool Ok { get; set; }
++        public List<string> Lines { get; } = new();
++        public Bitmap? Image { get; set; }
++    }
++
++    /// <summary>
++    /// Test 1 - detection only, nothing is clicked. With the mini-game open (START button visible) it checks:
++    /// START template, diamond/ring/scale, the 8 cup positions, cup template + size, and how many of the 8
++    /// cups the cup template recognises. Returns an annotated screenshot so the positions can be checked by eye.
++    /// </summary>
++    public MiniGameTestReport InspectMiniGame(AppConfig config, CancellationToken ct)
++    {
++        var report = new MiniGameTestReport();
++        var startCfg = config.GetTarget(TargetKey.MiniGameStartButton);
++        string startPath = Path.Combine(_templatesDir, startCfg.TemplateFileName);
++        if (!File.Exists(startPath))
++        {
++            report.Lines.Add($"THIẾU ảnh mẫu nút START ({startCfg.TemplateFileName}). Chụp mẫu ở thẻ 'Mini-game START' trước.");
++            return report;
++        }
++
++        using var startTpl = new Bitmap(startPath);
++        Rectangle bounds = ScreenMatcher.ResolveCaptureBounds(config);
++        var shot = ScreenMatcher.CaptureScreen(bounds);
++        report.Image = shot;
++        report.Lines.Add($"Vùng chụp: {bounds.Width}x{bounds.Height} tại ({bounds.X},{bounds.Y}).");
++
++        var start = ScreenMatcher.FindBestMatch(shot, bounds.Location, startTpl, startCfg, ct);
++        if (start == null)
++        {
++            var near = ScreenMatcher.FindBestMatch(shot, bounds.Location, startTpl, startCfg, ct, thresholdOverride: 0.40);
++            report.Lines.Add("KHÔNG thấy nút START. Cần mở mini-game 'Kim cương ở đâu?' (chưa bấm START) rồi test lại.");
++            report.Lines.Add(near != null
++                ? $"Chỗ giống nhất chỉ đạt {near.Score:P0} (cần ≥ {startCfg.Threshold:P0}). Thử chụp lại ảnh mẫu START."
++                : "Không có vùng nào giống nút START.");
++            return report;
++        }
++
++        report.Lines.Add($"Thấy nút START ({start.Score:P0}).");
++
++        var layout = ComputeMiniGameLayout(config, bounds, shot, start.ScreenBounds);
++        report.Lines.Add(layout.FromDiamond
++            ? $"Thấy kim cương ở giữa vòng: tỉ lệ {layout.Scale:F2}, tâm vòng ({layout.RingCenter.X},{layout.RingCenter.Y})."
++            : $"KHÔNG thấy kim cương (có thể mini-game đã bấm START). Đang ước tính từ nút START, tỉ lệ {layout.Scale:F2}.");
++        report.Lines.Add($"8 hộp: mỗi ô {layout.SlotRects[0].Width}x{layout.SlotRects[0].Height}px; " +
++                         (layout.InsideCapture ? "nằm trong vùng chụp." : "NẰM NGOÀI vùng chụp (kiểm tra cửa sổ game / MiniGameLayoutScale)."));
++
++        bool trackerOk = false;
++        int cupsFound = -1;
++        if (!config.MiniGameUseSpinTracker)
++        {
++            report.Lines.Add("Bộ theo dõi cốc quay đang TẮT (MiniGameUseSpinTracker = false).");
++        }
++        else if (layout.InsideCapture)
++        {
++            using var tracker = CreateSpinTracker(config, bounds, layout.SlotRects, layout.Scale, layout.TrackArea);
++            if (tracker == null)
++            {
++                report.Lines.Add("Bộ theo dõi cốc quay KHÔNG khởi tạo được (xem log phía trên: thiếu cup_template.png hoặc lỗi OpenCV).");
++            }
++            else
++            {
++                using var frame = ScreenMatcher.CaptureScreen(layout.TrackArea);
++                var probe = tracker.Probe(frame);
++                cupsFound = probe.Cups;
++                trackerOk = probe.Cups >= 8;
++                report.Lines.Add($"Ảnh mẫu cái ly nhận ra {probe.Cups}/8 cốc (góc {probe.Angle}°, độ khớp TB {probe.MeanScore:P0}). " +
++                                 (trackerOk ? "Tốt." : "CHƯA ĐỦ 8: ảnh mẫu hoặc kích thước chưa khớp, theo dõi có thể kém."));
++            }
++        }
++
++        report.Ok = layout.InsideCapture && (!config.MiniGameUseSpinTracker || trackerOk);
++
++        // Annotate
++        using (var g = Graphics.FromImage(shot))
++        {
++            using var greenPen = new Pen(Color.Lime, 3f);
++            using var cyanPen = new Pen(Color.Cyan, 3f);
++            using var yellowPen = new Pen(Color.Yellow, 2.5f);
++            using var magentaPen = new Pen(Color.Magenta, 2f) { DashStyle = System.Drawing.Drawing2D.DashStyle.Dash };
++            using var font = new Font("Segoe UI", 12f, FontStyle.Bold);
++
++            Rectangle Rel(Rectangle r) => new(r.X - bounds.X, r.Y - bounds.Y, r.Width, r.Height);
++
++            g.DrawRectangle(greenPen, Rel(start.ScreenBounds));
++            g.DrawString("START", font, Brushes.Lime, start.ScreenBounds.X - bounds.X, Math.Max(0, start.ScreenBounds.Y - bounds.Y - 22));
++            if (layout.Diamond is { } dm)
++                g.DrawRectangle(cyanPen, Rel(dm));
++            g.DrawRectangle(magentaPen, Rel(layout.TrackArea));
++            for (int i = 0; i < layout.SlotRects.Count; i++)
++            {
++                var r = Rel(layout.SlotRects[i]);
++                g.DrawRectangle(yellowPen, r);
++                g.DrawString($"{i + 1}", font, Brushes.Yellow, r.X + 4, r.Y + 2);
++            }
++
++            int cxr = layout.RingCenter.X - bounds.X;
++            int cyr = layout.RingCenter.Y - bounds.Y;
++            g.DrawLine(cyanPen, cxr - 12, cyr, cxr + 12, cyr);
++            g.DrawLine(cyanPen, cxr, cyr - 12, cxr, cyr + 12);
++        }
++
++        report.Lines.Add(report.Ok
++            ? "KẾT LUẬN: nhận diện ổn. Ô vàng #1..#8 (từ hộp trên cùng, theo chiều kim đồng hồ) phải trùm đúng 8 hộp trong ảnh."
++            : "KẾT LUẬN: chưa đạt, xem các dòng ở trên.");
++        return report;
++    }
++
++    /// <summary>
++    /// Test 2 - plays the mini-game once for real (moves the mouse and clicks), exactly like a normal run.
++    /// Waits up to waitSeconds for the START button to appear, so it can be started before the mini-game shows.
++    /// </summary>
++    public async Task TestPlayMiniGameAsync(AppConfig config, int waitSeconds, CancellationToken ct)
++    {
++        var startCfg = config.GetTarget(TargetKey.MiniGameStartButton);
++        string startPath = Path.Combine(_templatesDir, startCfg.TemplateFileName);
++        if (!File.Exists(startPath))
++            throw new FileNotFoundException($"Thiếu ảnh mẫu nút START ({startCfg.TemplateFileName}).", startPath);
++
++        using var startTpl = new Bitmap(startPath);
++        var templates = new Dictionary<TargetKey, Bitmap> { [TargetKey.MiniGameStartButton] = startTpl };
++
++        _log($"[Test mini-game] Chờ nút START tối đa {waitSeconds}s (mở mini-game 'Kim cương ở đâu?' trong game)...");
++        UpdateStep("Test mini-game: chờ nút START");
++
++        var deadline = DateTime.UtcNow.AddSeconds(Math.Max(3, waitSeconds));
++        MatchResult? start = null;
++        while (DateTime.UtcNow < deadline)
++        {
++            ct.ThrowIfCancellationRequested();
++            Rectangle bounds = ScreenMatcher.ResolveCaptureBounds(config);
++            using var shot = ScreenMatcher.CaptureScreen(bounds);
++            start = ScreenMatcher.FindBestMatch(shot, bounds.Location, startTpl, startCfg, ct);
++            if (start != null)
++                break;
++            await Task.Delay(150, ct);
++        }
++
++        if (start == null)
++        {
++            _log("[Test mini-game] Hết thời gian chờ mà không thấy nút START. Hãy dùng nút 'Kiểm tra mini-game' để xem vì sao.");
++            return;
++        }
++
++        await HandleMiniGameAsync(config, templates, start, 0, ct);
++        UpdateStep("Test mini-game: xong");
++        _log("[Test mini-game] Hoàn tất một lần chơi thử.");
++    }
++
+     private Dictionary<TargetKey, Bitmap> LoadTemplates(AppConfig config)
+     {
+         var dict = new Dictionary<TargetKey, Bitmap>();
+@@ -387,63 +605,26 @@ public sealed class WorkflowRunner
+         UpdateStep($"Vòng #{loopNum} - Mini-game: Xác định vị trí 8 hộp");
+ 
+         Rectangle captureBounds = ScreenMatcher.ResolveCaptureBounds(config);
+-        Point startCenter = new(
+-            startMatch.ScreenBounds.Left + startMatch.ScreenBounds.Width / 2,
+-            startMatch.ScreenBounds.Top + startMatch.ScreenBounds.Height / 2);
+-
+-        // Before START is pressed the diamond sits in the middle of the ring: it gives us the ring centre
+-        // and the on-screen scale, so the layout does not depend on a fixed zoom level.
+-        var diamondSearch = new Rectangle(startCenter.X - 900, startCenter.Y - 650, 900, 630);
+-        Rectangle? diamond0;
++        MiniGameLayout layout;
+         using (var shot = ScreenMatcher.CaptureScreen(captureBounds))
+-            diamond0 = ScreenMatcher.FindDiamondBounds(shot, captureBounds.Location, diamondSearch);
++            layout = ComputeMiniGameLayout(config, captureBounds, shot, startMatch.ScreenBounds);
+ 
+-        Point ringCenter;
+-        double scale;
+-        if (diamond0 is { } d0)
+-        {
+-            scale = Math.Clamp(d0.Width / MiniGameDiamondRefWidth, 0.4, 4.0);
+-            ringCenter = new Point(d0.X + d0.Width / 2, d0.Y + d0.Height / 2);
+-            _log($"[Mini-game] Thấy kim cương ở giữa vòng hộp (tỉ lệ {scale:F2}).");
+-        }
+-        else
+-        {
+-            scale = Math.Clamp(config.MiniGameLayoutScale, 0.3, 4.0);
+-            ringCenter = new Point(
+-                startCenter.X + (int)Math.Round(MiniGameRingFromStart.X * scale),
+-                startCenter.Y + (int)Math.Round(MiniGameRingFromStart.Y * scale));
+-            _log("[Mini-game] Không thấy kim cương, tính vị trí 8 hộp từ nút START.");
+-        }
++        _log(layout.FromDiamond
++            ? $"[Mini-game] Thấy kim cương ở giữa vòng hộp (tỉ lệ {layout.Scale:F2})."
++            : "[Mini-game] Không thấy kim cương, tính vị trí 8 hộp từ nút START.");
+ 
+-        int halfW = Math.Max(4, (int)Math.Round(MiniGameSlotHalfWidth * scale));
+-        int halfH = Math.Max(4, (int)Math.Round(MiniGameSlotHalfHeight * scale));
+-        var slotRects = new List<Rectangle>(MiniGameRingOffsets.Length);
+-        foreach (var off in MiniGameRingOffsets)
+-        {
+-            int cx = ringCenter.X + (int)Math.Round(off.X * scale);
+-            int cy = ringCenter.Y + (int)Math.Round(off.Y * scale);
+-            slotRects.Add(new Rectangle(cx - halfW, cy - halfH, halfW * 2, halfH * 2));
+-        }
+-
+-        Rectangle ring = slotRects[0];
+-        foreach (var r in slotRects)
+-            ring = Rectangle.Union(ring, r);
+-        ring.Inflate(6, 6);
++        Point ringCenter = layout.RingCenter;
++        double scale = layout.Scale;
++        List<Rectangle> slotRects = layout.SlotRects;
++        Rectangle ring = layout.Ring;
++        Rectangle trackArea = layout.TrackArea;
+ 
+-        if (!captureBounds.Contains(ring))
++        if (!layout.InsideCapture)
+         {
+             _log("[Mini-game] Vùng 8 hộp nằm ngoài cửa sổ game. Bỏ qua mini-game.");
+             return;
+         }
+ 
+-        // Area that is captured while the cups shuffle: the ring plus the room the cups fly through
+-        Rectangle trackArea = new(
+-            ringCenter.X - (int)Math.Round(215 * scale),
+-            ringCenter.Y - (int)Math.Round(205 * scale),
+-            (int)Math.Round(430 * scale),
+-            (int)Math.Round(420 * scale));
+-        trackArea = Rectangle.Intersect(captureBounds, Rectangle.Union(trackArea, ring));
+-
+         // The spinning-cup tracker needs the on-screen size of one cup: measure the isolated top and bottom cups
+         using var tracker = config.MiniGameUseSpinTracker
+             ? CreateSpinTracker(config, captureBounds, slotRects, scale, trackArea)
+diff --git a/Forms/MainForm.cs b/Forms/MainForm.cs
+index 0ea8c72..d652328 100644
+--- a/Forms/MainForm.cs
++++ b/Forms/MainForm.cs
+@@ -241,12 +241,12 @@ public sealed class MainForm : Form
+         };
+         body.Controls.Add(leftContainer, 0, 0);
+ 
+-        var leftHeader = new Panel { Dock = DockStyle.Top, Height = 40 };
++        var leftHeader = new Panel { Dock = DockStyle.Top, Height = 78 };
+         var lblTemplatesTitle = new Label
+         {
+             Text = "Ảnh mẫu nhận diện (Chụp trực tiếp từ cửa sổ game)",
+-            Dock = DockStyle.Left,
+-            Width = 420,
++            Location = new Point(0, 0),
++            Size = new Size(420, 40),
+             Font = new Font("Segoe UI", 10.5f, FontStyle.Bold),
+             ForeColor = Color.FromArgb(248, 250, 252),
+             TextAlign = ContentAlignment.MiddleLeft
+@@ -254,8 +254,14 @@ public sealed class MainForm : Form
+         var btnTestAllBlue = MakeButton("🔍 Test tìm tất cả thanh xanh lam", new Point(425, 5), new Size(220, 30), Color.FromArgb(14, 116, 144));
+         btnTestAllBlue.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+         btnTestAllBlue.Click += async (_, _) => await TestBlueBarsPreviewAsync();
++        var btnCheckMini = MakeButton("🧪 Kiểm tra mini-game (không nhấn)", new Point(5, 42), new Size(250, 30), Color.FromArgb(124, 58, 237));
++        btnCheckMini.Click += async (_, _) => await TestMiniGameCheckAsync();
++        var btnPlayMini = MakeButton("🎮 Chơi thử mini-game 1 lần (nhấn thật)", new Point(262, 42), new Size(270, 30), Color.FromArgb(190, 24, 93));
++        btnPlayMini.Click += (_, _) => TestMiniGamePlay();
+         leftHeader.Controls.Add(lblTemplatesTitle);
+         leftHeader.Controls.Add(btnTestAllBlue);
++        leftHeader.Controls.Add(btnCheckMini);
++        leftHeader.Controls.Add(btnPlayMini);
+ 
+         _templatesPanel = new FlowLayoutPanel
+         {
+@@ -1093,6 +1099,110 @@ public sealed class MainForm : Form
+         preview.ShowDialog(this);
+     }
+ 
++    private WorkflowRunner CreateTestRunner() => new(
++        _templatesDir,
++        msg => SafeUi(() => AppendLog(msg)),
++        stats => SafeUi(() => _lblStatus.Text = $"Trạng thái: {stats.CurrentStep}"));
++
++    private bool IsRunning() => _runTask != null && !_runTask.IsCompleted;
++
++    /// <summary>Test 1: mini-game detection only. Nothing is clicked.</summary>
++    private async Task TestMiniGameCheckAsync()
++    {
++        if (IsRunning())
++        {
++            MessageBox.Show(this, "Hãy dừng quy trình đang chạy trước khi test.", "Đang chạy", MessageBoxButtons.OK, MessageBoxIcon.Information);
++            return;
++        }
++
++        AppendLog("[Test mini-game] Kiểm tra nhận diện (không nhấn gì). Mở mini-game 'Kim cương ở đâu?' (chưa bấm START)...");
++        if (!string.IsNullOrWhiteSpace(_config.TargetWindowTitle))
++        {
++            Win32.BringWindowToFrontByTitle(_config.TargetWindowTitle);
++            await Task.Delay(500);
++        }
++
++        WorkflowRunner.MiniGameTestReport report;
++        try
++        {
++            var runner = CreateTestRunner();
++            report = await Task.Run(() => runner.InspectMiniGame(_config, CancellationToken.None));
++        }
++        catch (Exception ex)
++        {
++            AppendLog($"[Test mini-game] LỖI: {ex.Message}");
++            return;
++        }
++
++        foreach (string line in report.Lines)
++            AppendLog($"[Test mini-game] {line}");
++
++        if (report.Image != null)
++        {
++            using var preview = new PreviewForm(
++                report.Ok ? "Test mini-game: ĐẠT" : "Test mini-game: CHƯA ĐẠT", report.Image);
++            preview.ShowDialog(this);
++        }
++    }
++
++    /// <summary>Test 2: plays the mini-game once for real. Uses the normal stop button / F6 / F8.</summary>
++    private void TestMiniGamePlay()
++    {
++        if (IsRunning())
++        {
++            MessageBox.Show(this, "Hãy dừng quy trình đang chạy trước khi test.", "Đang chạy", MessageBoxButtons.OK, MessageBoxIcon.Information);
++            return;
++        }
++
++        var answer = MessageBox.Show(this,
++            "Sẽ đưa game lên trước, chờ tối đa 20 giây cho nút START của mini-game xuất hiện, rồi chơi MỘT lần " +
++            "(di chuột và nhấn thật).\n\nF8 hoặc nút DỪNG để dừng khẩn cấp. Tiếp tục?",
++            "Chơi thử mini-game", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
++        if (answer != DialogResult.Yes)
++            return;
++
++        _cts = new CancellationTokenSource();
++        var ct = _cts.Token;
++        _btnStartStop.Text = "⏹ DỪNG (F6 / F8)";
++        _btnStartStop.BackColor = Color.FromArgb(220, 38, 38);
++
++        var runner = CreateTestRunner();
++        string title = _config.TargetWindowTitle;
++
++        _runTask = Task.Run(async () =>
++        {
++            try
++            {
++                if (!string.IsNullOrWhiteSpace(title))
++                {
++                    Win32.BringWindowToFrontByTitle(title);
++                    await Task.Delay(500, ct);
++                }
++
++                await runner.TestPlayMiniGameAsync(_config, 20, ct);
++            }
++            catch (OperationCanceledException)
++            {
++                SafeUi(() => AppendLog("[Test mini-game] Đã dừng theo yêu cầu."));
++            }
++            catch (Exception ex)
++            {
++                SafeUi(() => AppendLog($"[Test mini-game] LỖI: {ex.Message}"));
++            }
++            finally
++            {
++                try { Win32.LeftUp(); } catch { }
++
++                SafeUi(() =>
++                {
++                    _btnStartStop.Text = "▶ BẮT ĐẦU (F6)";
++                    _btnStartStop.BackColor = Color.FromArgb(22, 163, 74);
++                    _lblStatus.Text = "Trạng thái: Đã dừng";
++                });
++            }
++        });
++    }
++
+     private async Task TestHumanMouseAsync()
+     {
+         AppendLog("Đang test di chuyển chuột theo đường cong ngẫu nhiên...");
